@@ -1,0 +1,44 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual Environments (CRITICAL!)
+venv/
+.venv/
+env/
+*/venv/
+*/env/
+
+# Large binary files
+*.dll
+*.dylib
+*.exe
+*.bin
+
+# Data files
+*.csv
+*.xlsx
+*.pkl
+*.db
+
+# Model files
+*.joblib
+models/
+saved_models/
+
+# Outputs
+outputs/
+results/
+*.png
+*.pdf
+
+# OS & IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# MLflow
+mlruns/
+mlartifacts/

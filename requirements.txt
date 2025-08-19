@@ -1,0 +1,30 @@
+# Core ML Libraries
+numpy>=1.21.0
+pandas>=1.3.0
+scikit-learn>=1.1.0
+scipy>=1.7.0
+
+# Visualization
+matplotlib>=3.4.0
+seaborn>=0.11.0
+
+# Advanced ML Libraries (Optional)
+xgboost>=1.6.0
+lightgbm>=3.3.0
+shap>=0.41.0
+
+# Data Processing
+joblib>=1.1.0
+openpyxl>=3.0.9
+pyarrow>=6.0.0
+
+# Progress & Utils
+tqdm>=4.62.0
+python-dateutil>=2.8.0
+
+# Experiment Tracking (Optional)
+mlflow>=1.20.0
+
+# Additional utilities
+hashlib-compat>=1.0.0
+pathlib2>=2.3.0  # For Python < 3.4 compatibility
