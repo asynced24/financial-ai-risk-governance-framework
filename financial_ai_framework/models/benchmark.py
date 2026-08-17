@@ -12,10 +12,14 @@ For every enabled model:
 4. Five governance gates - fairness, drift, calibration, uncertainty and Bayesian
    segment stability - each returning pass / warn / fail against ``config.yaml``.
 
-Class weights are deliberately left at their natural values. Rebalancing would
-lift the headline discrimination metrics while destroying the calibration the
-Brier and ECE gates exist to measure, and a probability of default that no longer
-means "probability of default" is not usable for provisioning.
+Class weights are deliberately left at their natural values. Rebalancing buys no
+measurable discrimination on this dataset - refitting with
+``class_weight="balanced"`` moves test ROC-AUC by +0.0016 for logistic regression
+and -0.0033 for LightGBM, inside the fold-to-fold spread and not even signed
+consistently - while it does reliably destroy the calibration the Brier and ECE
+gates exist to measure (logistic ECE 0.0333 -> 0.2116, LightGBM 0.0411 -> 0.1303).
+A probability of default that no longer means "probability of default" is not
+usable for provisioning.
 """
 
 from __future__ import annotations

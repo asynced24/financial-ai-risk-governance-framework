@@ -34,8 +34,11 @@ verdict on every run. Three things follow from that:
 - **Fairness is measured on an attribute the model never saw.** `sex` and
   `marriage` are withheld from the feature matrix entirely as prohibited bases and
   kept only for auditing. The logistic regression model's predictions still show an
-  equalized-odds gap of **0.1617** on `sex`, past the 0.10 fail limit - real
-  evidence that fairness is not fixed by removing protected columns. `age`, unlike
+  equalized-odds gap of **0.1617** on `sex`, past the 0.10 fail limit - a withheld
+  column is not a removed effect. The number itself carries a 95% interval of
+  [0.050, 0.274] and drops to 0.0245 on the full 30,000 rows, so read it as evidence
+  of the mechanism rather than a measurement of its size; both are worked through
+  [below](#a-flagged-example-fair-on-parity-unfair-on-error-rates). `age`, unlike
   sex or marital status, is used directly as a feature - 8th to 12th of 49 by SHAP
   importance depending on the model - and is separately audited via `age_band`; a
   gap there reflects age being used as intended, not a proxy leak.
@@ -164,8 +167,9 @@ signal in this run is the gate matrix, not the leaderboard.
 The worked examples below all use **LightGBM**, whose numbers are bit-identical on
 Windows and Linux (see the reproducibility note). Supporting figures for it: max
 feature PSI 0.0156 across all 49 features (no drift, as expected on a random split);
-17.8% of the test set above the 0.60-nat entropy threshold; ROC-AUC 95% bootstrap
-interval [0.7022, 0.8097]. Top SHAP drivers: `pay_status_1` (0.359),
+17.8% of the test set above the 0.60-nat entropy threshold, against a warn line at
+35% and a fail line at 55%, so the uncertainty gate is nowhere near firing; ROC-AUC
+95% bootstrap interval [0.7022, 0.8097]. Top SHAP drivers: `pay_status_1` (0.359),
 `max_delinquency` (0.152), `limit_bal` (0.135), `delinquent_months` (0.122) - most
 recent repayment status dominates, which is what the source paper found too. SHAP
 runs on whichever model the selection metric picks, so the committed CI artifact
@@ -177,7 +181,10 @@ Across Windows and Linux, on the same seed and the same sample hash:
 
 - `logistic_regression` and `lightgbm` reproduce **bit-identically** - every metric,
   every gate verdict, every credible interval.
-- The Bayesian layer reproduces bit-identically everywhere; it is pure numpy/scipy.
+- The Bayesian layer reproduces bit-identically on both platforms too. Being
+  numpy/scipy only, with no threaded reduction of its own, makes that likely rather
+  than guaranteed - cross-platform bit-identity really turns on the BLAS build
+  underneath, not on the choice of library.
 - `xgboost` does **not**. Its histogram tree builder reduces floating-point sums in a
   thread- and platform-dependent order, so the same seed gives ROC-AUC 0.7672 on
   Linux and 0.7625 on Windows (ECE 0.0320 vs 0.0438).
@@ -216,17 +223,39 @@ proxy.
 The withheld-attribute case is `sex`, and the sharper result there is on
 **logistic regression** rather than LightGBM:
 
-| `sex` | n | Predicted default rate | Observed default rate | TPR | FPR |
-|---|---|---|---|---|---|
-| male (1) | 495 | 0.1333 | 0.2283 | **0.4071** | 0.0524 |
-| female (2) | 755 | 0.0874 | 0.2159 | **0.2454** | 0.0439 |
+| `sex` | n | Defaulters | Predicted default rate | Observed default rate | TPR | FPR |
+|---|---|---|---|---|---|---|
+| male (1) | 495 | 113 | 0.1333 | 0.2283 | **0.4071** | 0.0524 |
+| female (2) | 755 | 163 | 0.0874 | 0.2159 | **0.2454** | 0.0439 |
 
 Demographic parity gap 0.0459, passing. Equalized odds gap **0.1617**, failing,
 again on the TPR spread alone - the FPR spread is 0.0084. `sex` is not in the
 feature matrix and neither is `marriage`, so the model produced that gap without
-ever reading the column; the effect arrives through correlated repayment behaviour.
-That is the case excluding a protected column does not cover, and the reason the
-gate audits withheld attributes instead of treating exclusion as sufficient.
+ever reading the column. That is the case excluding a protected column does not
+cover, and the reason the gate audits withheld attributes instead of treating
+exclusion as sufficient.
+
+**How strong is that number?** Not as strong as three unqualified decimal places
+suggest, and a project arguing that thin cells need intervals should say so. The TPR
+difference rests on 113 male and 163 female defaulters, giving a Wald standard error
+of 0.0572 and a 95% interval of **[0.050, 0.274]** (a 20,000-draw stratified
+bootstrap agrees: s.e. 0.0570, [0.050, 0.273]). The point estimate is 1.08 standard
+errors past the 0.10 limit. It is also threshold-dependent: 0.5 is the configured
+operating point but classifies only 10.6% of the book as a default against a 22.1%
+base rate, and at the base-rate-matched threshold of 0.3153 the gap is 0.0987 -
+just inside the pass limit. On the full 30,000 rows the gap falls to **0.0245**
+(95% interval [-0.021, 0.070]) and passes, while the fairness gate still fails, on
+`age_band` at 0.1121-0.1417. Same sign, sixth of the magnitude.
+
+So the mechanism holds and the magnitude does not, which is worth stating plainly.
+A withheld attribute *can* produce a measurable error-rate gap, and the gate finds
+it without being told to look for a proxy. How it gets back in is checkable rather
+than assertable: training a model to recover `sex` from the same 49 retained
+predictors reaches a test ROC-AUC of 0.588 (logistic) or 0.607 (LightGBM) against a
+60.4% female base rate, so `sex` is weakly but not negligibly recoverable from the
+repayment history - enough to be a plausible route, not enough to prove it is the
+route. Pinning the channel down needs a feature ablation this pipeline does not run.
+
 Logistic regression is also one of the two models that reproduce bit-identically
 across platforms, so this figure is not machine-dependent.
 
@@ -235,11 +264,29 @@ The 60-80 age band is excluded from the gate: 10 test rows is below the configur
 
 ### What the Bayesian shrinkage does
 
-Fitted prior across 19 segments (`education` x age-band): **Beta(88.87, 309.62)**,
-population default rate 0.2230, prior worth 398 equivalent borrowers. Method of
-moments, with the binomial sampling variance subtracted from the observed spread of
-segment rates first - skip that step and the prior comes out too diffuse and
-under-shrinks.
+Segments are `education` x age-band: four education levels after the undocumented
+codes are folded into "other", crossed with the five bands cut on the edges
+`[20, 30, 40, 50, 60, 80]` from `config.yaml` (left-closed). That is 20 possible
+cells, of which 19 appear here - `other_unknown | 60-80` has four borrowers in the
+full 30,000 rows and none of them land in the 5,000-row draw. Education and age are
+used because they are the two demographic columns the model is allowed to use as
+predictors; segmenting on `sex` or `marriage` would define the governance unit in
+terms of a column no lending decision may depend on.
+
+Fitted prior across those 19 segments: **Beta(88.87, 309.62)**, population default
+rate 0.2230, prior worth 398 equivalent borrowers. Method of moments, with the
+binomial sampling variance subtracted from the observed spread of segment rates
+first - skip that step and the prior comes out too diffuse and under-shrinks. The
+spread is taken unweighted across segments, since each segment contributes one draw
+of its latent rate; size-weighting the same 12 contributing segments gives 352.70
+equivalent borrowers instead of 398.49 and changes no verdict here.
+
+Two limitations, stated rather than buried: the prior is estimated from the 12
+segments that clear the 30-borrower floor and then treated as known when the
+credible intervals are formed, so those intervals are conditional on the fitted
+hyperparameters and understate the true uncertainty; and exchangeability across
+education x age-band cells is assumed, not tested. A covariate-adjusted small-area
+model (Fay-Herriot) would be the natural extension.
 
 7 of the 19 segments sit below the 30-borrower floor for prior fitting. They still
 get posteriors, which is the entire point:
@@ -275,10 +322,14 @@ aggregate metric on the leaderboard surfaces.
 | Lint | ruff |
 | CI | GitHub Actions: lint, tests on 3.12/3.13, end-to-end smoke |
 
-Class weights are left at their natural values throughout. Rebalancing would lift
-ROC-AUC and destroy the calibration that the ECE and Brier gates exist to measure,
-and a probability of default that no longer means "probability of default" is not
-usable for provisioning.
+Class weights are left at their natural values throughout. Rebalancing buys no
+measurable discrimination here - refitting with `class_weight="balanced"` moves test
+ROC-AUC by +0.0016 for logistic regression and -0.0033 for LightGBM, inside the
+fold-to-fold spread and not even signed consistently between the two - while it does
+reliably destroy calibration (logistic ECE 0.0333 -> 0.2116, LightGBM 0.0411 ->
+0.1303, mean predicted PD 0.217 -> 0.432 and 0.206 -> 0.342 against an observed
+0.221). A probability of default that no longer means "probability of default" is
+not usable for provisioning.
 
 ## Project layout
 
