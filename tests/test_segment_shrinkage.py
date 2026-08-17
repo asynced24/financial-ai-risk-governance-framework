@@ -1,9 +1,4 @@
-"""The empirical-Bayes shrinkage must behave the way the posterior algebra says.
-
-These are the load-bearing statistical properties: thin segments shrink hard,
-wide segments barely move, the posterior mean always sits between the raw rate and
-the population rate, and the blend weight equals n / (n + a + b).
-"""
+"""Tests the empirical-Bayes shrinkage against the posterior algebra."""
 
 from __future__ import annotations
 
@@ -211,5 +206,7 @@ def test_stability_gate_only_gates_segments_with_enough_rows(
     gate = SegmentStabilityCheck(settings).run(fitted, segments, predicted, "tiny")
     assert gate.metrics["segments_gated"] == 0
     assert gate.metrics["segments_evaluated"] == 1
-    assert gate.status == "pass"
+    # Nothing auditable warns rather than passes: a 0.0 outside-ratio here means
+    # "not measured", not "clean".
+    assert gate.status == "warn"
     assert "not enough" in gate.findings[0].lower() or "information only" in gate.findings[0]

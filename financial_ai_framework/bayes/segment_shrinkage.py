@@ -388,7 +388,13 @@ class SegmentStabilityCheck:
         n_outside = int((~gated["inside_interval"]).sum()) if n_gated else 0
         outside_ratio = (n_outside / n_gated) if n_gated else 0.0
 
-        status = self.thresholds.outside_interval_ratio.classify(outside_ratio)
+        if n_gated == 0:
+            # Nothing was auditable, which is not the same as nothing being wrong.
+            # An outside_ratio of 0.0 would classify as a pass and read as a clean
+            # bill of health. The fairness gate warns in the same situation.
+            status = "warn"
+        else:
+            status = self.thresholds.outside_interval_ratio.classify(outside_ratio)
 
         findings: list[str] = []
         if n_gated == 0:
