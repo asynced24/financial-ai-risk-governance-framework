@@ -1,8 +1,4 @@
-"""Each governance gate must fire on a known-bad input and stay quiet on a good one.
-
-Gates that cannot distinguish the two are decoration, so every check here builds a
-synthetic case with the answer known in advance.
-"""
+"""Each governance gate must fire on a known-bad input and stay quiet on a good one."""
 
 from __future__ import annotations
 

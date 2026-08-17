@@ -1,9 +1,4 @@
-"""Shared gate result type used by every governance check.
-
-Each governance module returns a :class:`GateResult` so the reporter can treat
-fairness, drift, calibration, uncertainty and segment stability uniformly: one
-verdict, the metrics behind it, and the threshold that produced it.
-"""
+"""Shared GateResult type and status aggregation used by every governance check."""
 
 from __future__ import annotations
 

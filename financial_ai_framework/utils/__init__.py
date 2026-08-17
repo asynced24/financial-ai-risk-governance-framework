@@ -1,1 +1,1 @@
-"""Cross-cutting utilities: experiment tracking and reproducibility."""
+"""Experiment tracking and seed-pinning helpers."""

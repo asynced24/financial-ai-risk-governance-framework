@@ -1,9 +1,4 @@
-"""Shared fixtures. Everything runs against the committed offline sample.
-
-The heavyweight fixtures are session-scoped and use a shrunk copy of the real
-settings (fewer trees, fewer folds, fewer bootstrap draws) so the suite exercises
-the genuine code paths without paying the full training cost.
-"""
+"""Shared fixtures, all running against the committed offline sample."""
 
 from __future__ import annotations
 

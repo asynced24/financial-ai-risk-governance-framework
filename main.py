@@ -50,7 +50,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  python main.py --sample            run offline on the committed sample (~60s)\n"
+            "  python main.py --sample            run offline on the committed sample (~15-20s)\n"
             "  python main.py                     fetch the full UCI dataset and run\n"
             "  python main.py --refresh-sample    regenerate the committed offline sample\n"
             "  python main.py --sample --no-shap  skip the explainability stage\n"

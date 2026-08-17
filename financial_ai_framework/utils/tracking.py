@@ -1,11 +1,4 @@
-"""Experiment tracking and reproducibility utilities.
-
-``ExperimentTracker`` wraps MLflow with a local-JSON fallback so a run is always
-recorded somewhere: with MLflow enabled the params, metrics and artefacts land in
-the tracking store, and without it they land in
-``reports/experiment_log_<run>.json``. Every module logs through this one object,
-so nothing has to care which backend is live.
-"""
+"""Experiment tracking via MLflow, falling back to a local JSON run log."""
 
 from __future__ import annotations
 
@@ -27,6 +20,8 @@ def ensure_reproducibility(seed: int = SEED) -> None:
     """Pin every seed the framework depends on."""
     random.seed(seed)
     np.random.seed(seed)
+    # only affects child processes spawned after this point; has no effect on this
+    # interpreter's hash ordering, which was fixed at startup
     os.environ["PYTHONHASHSEED"] = str(seed)
     print(f"[repro] seeds pinned to {seed}")
 
