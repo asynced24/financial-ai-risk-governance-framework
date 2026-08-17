@@ -1,37 +1,51 @@
-﻿# Python
+# Python
 __pycache__/
 *.py[cod]
 *.so
+*.egg-info/
+build/
+dist/
 
-# Virtual Environments (CRITICAL!)
+# Virtual environments
 venv/
 .venv/
 env/
 */venv/
 */env/
 
-# Large binary files
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Compiled / binary artefacts
 *.dll
 *.dylib
 *.exe
 *.bin
 
-# Data files
-*.csv
-*.xlsx
-*.pkl
-*.db
+# Cached raw dataset (re-fetched from UCI on demand).
+# NOTE: this used to be a blanket `*.csv` rule, which silently excluded the
+# committed offline sample in data/sample/. Scope data ignores to the cache only.
+/data/raw/*
+!/data/raw/.gitkeep
 
-# Model files
+# Serialised models.
+# NOTE: this used to be a bare `models/` rule, which silently excluded the
+# financial_ai_framework/models/ source package. Keep it scoped to artefacts.
+/saved_models/
 *.joblib
-models/
-saved_models/
+*.pkl
 
-# Outputs
+# Generated reports (scorecards, model cards, SHAP artefacts)
+/reports/*
+!/reports/.gitkeep
+
+# Other generated output
 outputs/
 results/
-*.png
-*.pdf
 
 # OS & IDE
 .DS_Store

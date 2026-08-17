@@ -1,129 +1,177 @@
-"""Data drift detection for financial AI models."""
+"""Drift gate: Population Stability Index between the train and test splits.
+
+PSI is the standard measure in credit risk for "has this feature's distribution
+moved". Reference (train) quantile bins are held fixed and the current (test)
+population is scored into them:
+
+    PSI = sum over bins of  (current_share - reference_share) * ln(current_share / reference_share)
+
+Conventional reading: below 0.10 stable, 0.10-0.25 moderate shift, above 0.25
+significant shift. Those cut-offs live in ``config.yaml``, not here.
+
+Drift is a property of the data, not of any one model, so the suite computes this
+gate once per run and attaches the same verdict to every model's scorecard.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
-from typing import Dict, Any, List
+import pandas as pd
 from scipy.stats import ks_2samp
-from scipy import stats
-from ..config.settings import RISK_THRESHOLDS, ExperimentConfig
+
+from ..config import Settings
+from .gates import GateResult, worst_status
+
+_EPSILON = 1e-6
+
+
+def population_stability_index(
+    reference: Sequence[float],
+    current: Sequence[float],
+    bins: int = 10,
+) -> float:
+    """PSI of ``current`` against ``reference`` using reference quantile bins.
+
+    Constant reference features return 0.0 - there is no distribution to shift.
+    """
+    ref = np.asarray(reference, dtype=float)
+    cur = np.asarray(current, dtype=float)
+    ref = ref[np.isfinite(ref)]
+    cur = cur[np.isfinite(cur)]
+
+    if len(ref) == 0 or len(cur) == 0:
+        return 0.0
+
+    edges = np.unique(np.quantile(ref, np.linspace(0.0, 1.0, bins + 1)))
+    if len(edges) < 3:
+        # Degenerate / near-constant feature: fall back to a share comparison of
+        # the single distinct reference value.
+        value = ref[0]
+        ref_share = float(np.mean(ref == value))
+        cur_share = float(np.mean(cur == value))
+        if min(ref_share, cur_share) <= 0 or abs(ref_share - cur_share) < _EPSILON:
+            return 0.0
+        return float((cur_share - ref_share) * np.log(cur_share / ref_share))
+
+    edges[0], edges[-1] = -np.inf, np.inf
+
+    ref_counts, _ = np.histogram(ref, bins=edges)
+    cur_counts, _ = np.histogram(cur, bins=edges)
+
+    ref_share = np.maximum(ref_counts / len(ref), _EPSILON)
+    cur_share = np.maximum(cur_counts / len(cur), _EPSILON)
+
+    return float(np.sum((cur_share - ref_share) * np.log(cur_share / ref_share)))
 
 
 class DriftDetector:
-    """Data drift detection with comprehensive statistical tests."""
-    
-    def __init__(self, config: ExperimentConfig, tracker):
-        self.config = config
+    """Governance gate on train-vs-test feature drift."""
+
+    def __init__(self, settings: Settings, tracker=None):
+        self.settings = settings
         self.tracker = tracker
-    
-    def comprehensive_drift_detection(self, X_train: np.ndarray, X_test: np.ndarray, feature_names: List[str]) -> Dict[str, Any]:
-        """Comprehensive data drift detection analysis."""
-        if not self.config.enable_drift_detection:
-            return {'status': 'disabled'}
-        
-        print("🌊 Performing comprehensive data drift analysis...")
-        results = {}
-        drift_detected_features = []
-        
-        # Limit features for performance but be more comprehensive
-        max_features = min(50, X_train.shape[1])
-        feature_indices = np.random.choice(X_train.shape[1], size=max_features, replace=False)
-        
-        for idx in feature_indices:
-            if idx >= len(feature_names):
+        self.thresholds = settings.governance.drift
+
+    def run(
+        self,
+        X_train: pd.DataFrame,
+        X_test: pd.DataFrame,
+        feature_names: Sequence[str] | None = None,
+    ) -> GateResult:
+        """Score every feature deterministically - no sampling, no shortcuts."""
+        features = list(feature_names) if feature_names is not None else list(X_train.columns)
+        bins = self.thresholds.psi_bins
+
+        per_feature: dict[str, dict[str, float]] = {}
+        for name in features:
+            if name not in X_train.columns or name not in X_test.columns:
                 continue
-            
-            feature_name = feature_names[idx]
-            train_feature = X_train[:, idx]
-            test_feature = X_test[:, idx]
-            
-            # Remove NaN values
-            train_clean = train_feature[~np.isnan(train_feature)]
-            test_clean = test_feature[~np.isnan(test_feature)]
-            
-            if len(train_clean) == 0 or len(test_clean) == 0:
-                continue
-            
-            feature_result = {}
-            
-            # Kolmogorov-Smirnov test
+
+            ref = X_train[name].to_numpy(dtype=float)
+            cur = X_test[name].to_numpy(dtype=float)
+
+            psi = population_stability_index(ref, cur, bins=bins)
             try:
-                ks_stat, ks_pvalue = ks_2samp(train_clean, test_clean)
-                feature_result['ks_statistic'] = ks_stat
-                feature_result['ks_pvalue'] = ks_pvalue
-                feature_result['ks_drift'] = ks_pvalue < RISK_THRESHOLDS['drift_pvalue']
-            except:
-                feature_result['ks_statistic'] = 0.0
-                feature_result['ks_pvalue'] = 1.0
-                feature_result['ks_drift'] = False
-            
-            # Population Stability Index (PSI)
-            psi = self._calculate_psi(train_clean, test_clean)
-            feature_result['psi'] = psi
-            feature_result['psi_drift'] = psi > 0.2  # Industry standard threshold
-            
-            # Wasserstein distance (Earth Mover's Distance)
-            try:
-                wasserstein_dist = stats.wasserstein_distance(train_clean, test_clean)
-                feature_result['wasserstein_distance'] = wasserstein_dist
-            except:
-                feature_result['wasserstein_distance'] = 0.0
-            
-            # Mean and variance shift
-            train_mean, train_std = np.mean(train_clean), np.std(train_clean)
-            test_mean, test_std = np.mean(test_clean), np.std(test_clean)
-            
-            feature_result['mean_shift'] = abs(test_mean - train_mean) / (train_std + 1e-10)
-            feature_result['variance_shift'] = abs(test_std - train_std) / (train_std + 1e-10)
-            
-            # Overall drift decision
-            drift_detected = (
-                feature_result['ks_drift'] or
-                feature_result['psi_drift'] or
-                feature_result['mean_shift'] > 2 or  # 2 standard deviations
-                feature_result['variance_shift'] > 0.5  # 50% variance change
+                ks_stat, ks_p = ks_2samp(ref, cur)
+            except ValueError:  # pragma: no cover - degenerate feature
+                ks_stat, ks_p = 0.0, 1.0
+
+            per_feature[name] = {
+                "psi": psi,
+                "psi_status": self.thresholds.feature_psi.classify(psi),
+                "ks_statistic": float(ks_stat),
+                "ks_pvalue": float(ks_p),
+                "reference_mean": float(np.mean(ref)),
+                "current_mean": float(np.mean(cur)),
+            }
+
+        if not per_feature:
+            return GateResult(
+                name="drift",
+                status="warn",
+                headline_metric="max_feature_psi",
+                headline_value=float("nan"),
+                threshold=self.thresholds.feature_psi.describe(),
+                metrics={"features_tested": 0},
+                findings=["No overlapping numeric features to test for drift"],
+                details={},
             )
-            
-            feature_result['drift_detected'] = drift_detected
-            
-            if drift_detected:
-                drift_detected_features.append(feature_name)
-            
-            results[feature_name] = feature_result
-        
-        # Summary statistics
-        results['summary'] = {
-            'total_features_tested': len(results) - 1 if 'summary' in results else len(results),
-            'drift_detected_count': len(drift_detected_features),
-            'drift_detected_features': drift_detected_features,
-            'drift_detected_ratio': len(drift_detected_features) / max(1, len(results) - (1 if 'summary' in results else 0)),
-            'avg_psi': np.mean([r['psi'] for r in results.values() if isinstance(r, dict) and 'psi' in r]),
-            'avg_ks_pvalue': np.mean([r['ks_pvalue'] for r in results.values() if isinstance(r, dict) and 'ks_pvalue' in r])
+
+        psis = {name: data["psi"] for name, data in per_feature.items()}
+        drifted = [name for name, data in per_feature.items() if data["psi_status"] != "pass"]
+        drifted_ratio = len(drifted) / len(per_feature)
+
+        max_name = max(psis, key=psis.get)
+        max_psi = psis[max_name]
+
+        feature_status = self.thresholds.feature_psi.classify(max_psi)
+        ratio_status = self.thresholds.drifted_feature_ratio.classify(drifted_ratio)
+        status = worst_status([feature_status, ratio_status])
+
+        findings: list[str] = []
+        for name in sorted(drifted, key=lambda n: psis[n], reverse=True):
+            findings.append(
+                f"{name}: PSI {psis[name]:.4f} ({per_feature[name]['psi_status']}, "
+                f"{self.thresholds.feature_psi.describe()})"
+            )
+        if ratio_status != "pass":
+            findings.append(
+                f"{len(drifted)}/{len(per_feature)} features drifted "
+                f"({drifted_ratio:.1%}), breaching the {ratio_status} limit "
+                f"({self.thresholds.drifted_feature_ratio.describe()})"
+            )
+
+        metrics: dict[str, Any] = {
+            "features_tested": len(per_feature),
+            "max_feature_psi": max_psi,
+            "max_psi_feature": max_name,
+            "mean_feature_psi": float(np.mean(list(psis.values()))),
+            "median_feature_psi": float(np.median(list(psis.values()))),
+            "drifted_features": len(drifted),
+            "drifted_feature_ratio": drifted_ratio,
         }
-        
-        # Log drift metrics
-        self.tracker.log_metric("drift_detected_ratio", results['summary']['drift_detected_ratio'])
-        self.tracker.log_metric("drift_avg_psi", results['summary']['avg_psi'])
-        
-        return results
-    
-    def _calculate_psi(self, train_data: np.ndarray, test_data: np.ndarray, bins: int = 10) -> float:
-        """Calculate Population Stability Index with enhanced binning."""
-        try:
-            # Use quantile-based binning for better distribution
-            bin_edges = np.percentile(train_data, np.linspace(0, 100, bins + 1))
-            bin_edges[0] = -np.inf  # Include all values
-            bin_edges[-1] = np.inf
-            
-            # Calculate distributions
-            train_dist = np.histogram(train_data, bins=bin_edges)[0] / len(train_data)
-            test_dist = np.histogram(test_data, bins=bin_edges)[0] / len(test_data)
-            
-            # Avoid division by zero with small constant
-            epsilon = 1e-10
-            train_dist = np.maximum(train_dist, epsilon)
-            test_dist = np.maximum(test_dist, epsilon)
-            
-            # Calculate PSI
-            psi = np.sum((test_dist - train_dist) * np.log(test_dist / train_dist))
-            return psi
-        except:
-            return 0.0
+
+        if self.tracker is not None:
+            for key in ("max_feature_psi", "mean_feature_psi", "drifted_feature_ratio"):
+                self.tracker.log_metric(f"drift_{key}", metrics[key])
+
+        return GateResult(
+            name="drift",
+            status=status,
+            headline_metric="max_feature_psi",
+            headline_value=max_psi,
+            threshold=self.thresholds.feature_psi.describe(),
+            metrics=metrics,
+            findings=findings,
+            details={
+                "scope": "data_level_shared_across_models",
+                "psi_bins": bins,
+                "feature_psi_threshold": self.thresholds.feature_psi.describe(),
+                "drifted_ratio_threshold": self.thresholds.drifted_feature_ratio.describe(),
+                "ratio_status": ratio_status,
+                "features": per_feature,
+            },
+        )

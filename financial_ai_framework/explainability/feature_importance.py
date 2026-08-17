@@ -1,86 +1,89 @@
-"""Feature importance analysis for financial AI models."""
+"""Native feature importance, aggregated across the benchmarked models.
+
+Cheap counterpart to SHAP: each fitted model already exposes either tree split
+gains or linear coefficients. Ranking features by the *agreement* across model
+families is a useful sanity check - a driver that only one model family cares
+about is usually an artefact rather than a signal.
+"""
+
+from __future__ import annotations
+
+from typing import Any
 
 import numpy as np
-from typing import Dict, Any, List
-from collections import defaultdict
-from ..config.settings import ExperimentConfig
+from sklearn.pipeline import Pipeline
+
+from ..config import Settings
+
+
+def native_importance(model: Any, feature_names: list[str]) -> dict[str, float]:
+    """Extract per-feature importance from a fitted estimator or pipeline.
+
+    Tree models report split importance directly; linear models report absolute
+    coefficient magnitude. Returns an empty dict for models that expose neither.
+    """
+    estimator = model.steps[-1][1] if isinstance(model, Pipeline) else model
+
+    if hasattr(estimator, "feature_importances_"):
+        values = np.asarray(estimator.feature_importances_, dtype=float)
+    elif hasattr(estimator, "coef_"):
+        coef = np.asarray(estimator.coef_, dtype=float)
+        values = np.abs(coef).mean(axis=0) if coef.ndim > 1 else np.abs(coef)
+    else:
+        return {}
+
+    if len(values) != len(feature_names):
+        return {}
+
+    total = values.sum()
+    if total > 0:
+        values = values / total  # comparable scale across families
+
+    return {name: float(value) for name, value in zip(feature_names, values, strict=True)}
 
 
 class FeatureImportanceAnalyzer:
-    """Feature importance analysis across multiple models."""
-    
-    def __init__(self, config: ExperimentConfig, tracker):
-        self.config = config
+    """Aggregates native importances across every benchmarked model."""
+
+    def __init__(self, settings: Settings, tracker=None):
+        self.settings = settings
         self.tracker = tracker
-    
-    def comprehensive_feature_importance_analysis(self, models: Dict, feature_names: List[str]) -> Dict[str, Any]:
-        """Comprehensive feature importance analysis across multiple methods."""
-        if not self.config.enable_feature_importance:
-            return {'status': 'disabled'}
-        
-        print("🔍 Performing comprehensive feature importance analysis...")
-        results = {}
-        
-        # Analyze each model's feature importance
-        model_importances = {}
-        for model_name, model in models.items():
-            model_importance = {}
-            
-            # Native feature importance
-            if hasattr(model, 'feature_importances_'):
-                importances = model.feature_importances_
-                model_importance['native'] = dict(zip(feature_names, importances))
-            elif hasattr(model, 'coef_'):
-                # For linear models, use coefficient magnitudes
-                if len(model.coef_.shape) > 1:
-                    importances = np.mean(np.abs(model.coef_), axis=0)
-                else:
-                    importances = np.abs(model.coef_)
-                model_importance['native'] = dict(zip(feature_names, importances))
-            
-            model_importances[model_name] = model_importance
-        
-        # Aggregate importance across models
-        if model_importances:
-            aggregated_importance = defaultdict(list)
-            
-            for model_name, importance_dict in model_importances.items():
-                if 'native' in importance_dict:
-                    for feature, importance in importance_dict['native'].items():
-                        aggregated_importance[feature].append(importance)
-            
-            # Calculate statistics across models
-            feature_importance_stats = {}
-            for feature, importances in aggregated_importance.items():
-                feature_importance_stats[feature] = {
-                    'mean': np.mean(importances),
-                    'std': np.std(importances),
-                    'min': np.min(importances),
-                    'max': np.max(importances),
-                    'models_count': len(importances)
-                }
-            
-            # Sort by mean importance
-            sorted_features = sorted(
-                feature_importance_stats.items(),
-                key=lambda x: x[1]['mean'],
-                reverse=True
-            )
-            
-            results['model_importances'] = model_importances
-            results['aggregated_importance'] = dict(sorted_features)
-            results['top_10_features'] = dict(sorted_features[:10])
-            results['top_20_features'] = dict(sorted_features[:20])
-            
-            # Feature importance categories
-            results['financial_ratios'] = {
-                k: v for k, v in dict(sorted_features).items()
-                if any(term in k.lower() for term in ['ratio', 'margin', 'turnover', 'coverage'])
+
+    def analyse(
+        self,
+        models: dict[str, Any],
+        feature_names: list[str],
+    ) -> dict[str, Any]:
+        per_model: dict[str, dict[str, float]] = {}
+        for name, model in models.items():
+            importance = native_importance(model, feature_names)
+            if importance:
+                per_model[name] = importance
+
+        if not per_model:
+            return {"status": "no_importances_available"}
+
+        stats: dict[str, dict[str, float]] = {}
+        for feature in feature_names:
+            values = [importance.get(feature, 0.0) for importance in per_model.values()]
+            stats[feature] = {
+                "mean": float(np.mean(values)),
+                "std": float(np.std(values)),
+                "min": float(np.min(values)),
+                "max": float(np.max(values)),
+                "models_counted": len(values),
             }
-            
-            results['size_metrics'] = {
-                k: v for k, v in dict(sorted_features).items()
-                if any(term in k.lower() for term in ['log_', 'total_assets', 'revenue', 'market_value'])
-            }
-        
-        return results
+
+        ranked = sorted(stats.items(), key=lambda kv: kv[1]["mean"], reverse=True)
+        top_n = self.settings.explainability.top_features
+
+        return {
+            "status": "success",
+            "per_model": per_model,
+            "aggregated": dict(ranked),
+            "top_features": {name: data["mean"] for name, data in ranked[:top_n]},
+            "consensus_note": (
+                "Importances are normalised to sum to 1.0 per model so tree split "
+                "gains and linear coefficient magnitudes are comparable in rank."
+            ),
+        }

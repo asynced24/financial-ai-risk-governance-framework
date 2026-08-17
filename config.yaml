@@ -1,0 +1,117 @@
+# Financial AI Risk & Governance Framework - runtime configuration
+#
+# Every governance threshold used anywhere in the framework lives in this file.
+# It is parsed into the pydantic v2 `Settings` model in
+# financial_ai_framework/config.py and validated at startup, so a typo or an
+# out-of-range limit fails loudly before a single model is trained.
+#
+# Gate thresholds are expressed as `warn` / `fail` pairs. Each gate classifies
+# its observed metric as pass / warn / fail against these limits.
+
+project:
+  name: financial-ai-risk-governance-framework
+  version: "2.0.0"
+  random_seed: 42
+
+data:
+  # UCI ML Repository dataset 350 - "Default of Credit Card Clients"
+  uci_dataset_id: 350
+  target_column: default_payment_next_month
+  raw_cache_dir: data/raw
+  sample_path: data/sample/uci_credit_sample.csv
+  sample_rows: 5000
+  test_size: 0.25
+
+segments:
+  # Segments for the empirical-Bayes shrinkage model: education x age-band.
+  education_column: education
+  age_column: age
+  age_bins: [20, 30, 40, 50, 60, 80]
+  # Segments smaller than this are excluded from fitting the population prior
+  # (they are still given a posterior - that is the point of shrinkage).
+  min_segment_size: 30
+  credible_mass: 0.95
+  prior_variance_floor: 1.0e-6
+
+models:
+  enabled:
+    - logistic_regression
+    - xgboost
+    - lightgbm
+  cv_folds: 5
+  decision_threshold: 0.5
+  selection_metric: roc_auc
+  logistic_max_iter: 2000
+  n_estimators: 300
+  learning_rate: 0.05
+  max_depth: 4
+  num_leaves: 31
+  subsample: 0.9
+  colsample_bytree: 0.9
+
+governance:
+  fairness:
+    protected_attributes: [sex, age_band]
+    min_group_size: 50
+    # Max-min spread in predicted positive (default) rate across groups.
+    demographic_parity:
+      warn: 0.05
+      fail: 0.10
+    # Larger of the max-min TPR spread and max-min FPR spread across groups.
+    equalized_odds:
+      warn: 0.05
+      fail: 0.10
+
+  drift:
+    psi_bins: 10
+    # Per-feature Population Stability Index, train vs test.
+    # Industry convention: <0.10 stable, 0.10-0.25 moderate, >0.25 significant.
+    feature_psi:
+      warn: 0.10
+      fail: 0.25
+    # Share of features whose PSI breaches the per-feature warn level.
+    drifted_feature_ratio:
+      warn: 0.10
+      fail: 0.25
+
+  calibration:
+    n_bins: 15
+    # Expected Calibration Error on the predicted probability of default.
+    ece:
+      warn: 0.03
+      fail: 0.08
+    # Brier score. A constant predictor at the ~22% base rate scores ~0.172,
+    # so anything at or above that is not adding calibrated signal.
+    brier:
+      warn: 0.160
+      fail: 0.175
+
+  uncertainty:
+    # Binary predictive entropy in nats; the maximum is ln(2) = 0.693.
+    high_entropy_threshold: 0.60
+    high_uncertainty_ratio:
+      warn: 0.35
+      fail: 0.55
+    bootstrap_samples: 200
+    bootstrap_sample_size: 500
+
+  segment_stability:
+    # Share of eligible segments whose mean predicted PD falls outside the
+    # shrunken empirical-Bayes credible interval for that segment.
+    outside_interval_ratio:
+      warn: 0.15
+      fail: 0.30
+
+explainability:
+  enable_shap: true
+  shap_sample_size: 300
+  shap_background_size: 100
+  local_explanations: 3
+  top_features: 15
+
+tracking:
+  # MLflow is optional. When disabled (or unavailable) the ExperimentTracker
+  # falls back to a local JSON run log written into the reports directory.
+  enable_mlflow: false
+  experiment_name: credit_default_governance
+  reports_dir: reports

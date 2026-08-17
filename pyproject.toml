@@ -1,0 +1,38 @@
+# Tool configuration only. Dependencies are pinned in requirements.txt and
+# requirements-dev.txt; this project runs from the repository root rather than
+# being installed as a distribution, so there is no build backend here.
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".venv", "data", "reports"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "W",   # pycodestyle warnings
+    "I",   # import sorting
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+]
+ignore = [
+    "E501",  # line length is enforced by the formatter, not the linter
+    "B008",  # pydantic Field(...) in defaults is intentional
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Star-style re-exports are the point of the package __init__.
+"financial_ai_framework/__init__.py" = ["F401"]
+# Tests reach into internals deliberately.
+"tests/*" = ["B011"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
+filterwarnings = [
+    "error::DeprecationWarning:financial_ai_framework.*",
+    "error::FutureWarning:financial_ai_framework.*",
+]

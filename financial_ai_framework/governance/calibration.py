@@ -1,106 +1,177 @@
-"""Model calibration analysis for financial AI models."""
+"""Calibration gate for probability-of-default models.
+
+A PD model that ranks well but is miscalibrated is unusable for provisioning: the
+number itself has to mean what it says. This module is the single source of truth
+for Expected Calibration Error in the framework - the benchmark suite calls
+:func:`expected_calibration_error` rather than computing its own.
+"""
+
+from __future__ import annotations
+
+from typing import Any
 
 import numpy as np
-from typing import Dict, Any
 from sklearn.metrics import brier_score_loss
-from ..config.settings import RISK_THRESHOLDS, ExperimentConfig
+
+from ..config import Settings
+from .gates import GateResult, worst_status
+
+
+def calibration_bins(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    n_bins: int = 15,
+) -> dict[str, list[float]]:
+    """Equal-width reliability bins over the predicted probability of default.
+
+    Returns the per-bin mean predicted probability, observed default rate, and
+    share of the population, keeping only non-empty bins.
+    """
+    y_true = np.asarray(y_true, dtype=float).ravel()
+    y_prob = np.asarray(y_prob, dtype=float).ravel()
+    if y_true.shape != y_prob.shape:
+        raise ValueError(f"Shape mismatch: y_true {y_true.shape} vs y_prob {y_prob.shape}")
+
+    edges = np.linspace(0.0, 1.0, n_bins + 1)
+    # np.digitize puts values exactly at 0.0 in bin 0; clamp the top edge in too.
+    idx = np.clip(np.digitize(y_prob, edges[1:-1], right=True), 0, n_bins - 1)
+
+    mean_predicted: list[float] = []
+    observed_rate: list[float] = []
+    weight: list[float] = []
+    counts: list[float] = []
+
+    total = len(y_prob)
+    for b in range(n_bins):
+        mask = idx == b
+        count = int(mask.sum())
+        if count == 0:
+            continue
+        mean_predicted.append(float(y_prob[mask].mean()))
+        observed_rate.append(float(y_true[mask].mean()))
+        weight.append(count / total)
+        counts.append(count)
+
+    return {
+        "mean_predicted": mean_predicted,
+        "observed_rate": observed_rate,
+        "weight": weight,
+        "count": counts,
+    }
+
+
+def expected_calibration_error(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    n_bins: int = 15,
+) -> float:
+    """Population-weighted mean gap between predicted and observed default rate."""
+    bins = calibration_bins(y_true, y_prob, n_bins=n_bins)
+    if not bins["weight"]:
+        return 0.0
+    return float(
+        sum(
+            w * abs(obs - pred)
+            for w, obs, pred in zip(bins["weight"], bins["observed_rate"], bins["mean_predicted"], strict=True)
+        )
+    )
+
+
+def maximum_calibration_error(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    n_bins: int = 15,
+) -> float:
+    """Worst single-bin gap between predicted and observed default rate."""
+    bins = calibration_bins(y_true, y_prob, n_bins=n_bins)
+    if not bins["weight"]:
+        return 0.0
+    return float(
+        max(abs(obs - pred) for obs, pred in zip(bins["observed_rate"], bins["mean_predicted"], strict=True))
+    )
 
 
 class CalibrationAnalyzer:
-    """Model calibration analysis with reliability assessment."""
-    
-    def __init__(self, config: ExperimentConfig, tracker):
-        self.config = config
+    """Governance gate on ECE and Brier score."""
+
+    def __init__(self, settings: Settings, tracker=None):
+        self.settings = settings
         self.tracker = tracker
-    
-    def advanced_calibration_analysis(self, model, X_test: np.ndarray, y_test: np.ndarray) -> Dict[str, Any]:
-        """Advanced model calibration analysis."""
-        if not self.config.enable_calibration:
-            return {'status': 'disabled'}
-        
-        print("🎯 Performing advanced calibration analysis...")
-        results = {}
-        
-        if not hasattr(model, 'predict_proba'):
-            return {'status': 'no_probabilities'}
-        
-        y_proba = model.predict_proba(X_test)
-        y_pred = model.predict(X_test)
-        
-        # Multi-class calibration analysis
-        confidence = np.max(y_proba, axis=1)
-        accuracy = (y_pred == y_test).astype(int)
-        
-        # Reliability analysis with adaptive binning
-        n_bins = min(15, len(X_test) // 50)  # Adaptive number of bins
-        bin_boundaries = np.linspace(0, 1, n_bins + 1)
-        bin_lowers = bin_boundaries[:-1]
-        bin_uppers = bin_boundaries[1:]
-        
-        bin_accuracies = []
-        bin_confidences = []
-        bin_counts = []
-        bin_sizes = []
-        
-        for bin_lower, bin_upper in zip(bin_lowers, bin_uppers):
-            in_bin = (confidence > bin_lower) & (confidence <= bin_upper)
-            prop_in_bin = in_bin.mean()
-            
-            if prop_in_bin > 0:
-                accuracy_in_bin = accuracy[in_bin].mean()
-                avg_confidence_in_bin = confidence[in_bin].mean()
-                count_in_bin = np.sum(in_bin)
-            else:
-                accuracy_in_bin = 0
-                avg_confidence_in_bin = (bin_lower + bin_upper) / 2
-                count_in_bin = 0
-            
-            bin_accuracies.append(accuracy_in_bin)
-            bin_confidences.append(avg_confidence_in_bin)
-            bin_counts.append(prop_in_bin)
-            bin_sizes.append(count_in_bin)
-        
-        # Expected Calibration Error (ECE)
-        ece = sum(bin_counts[i] * abs(bin_accuracies[i] - bin_confidences[i]) for i in range(n_bins))
-        
-        # Maximum Calibration Error (MCE)
-        mce = max(abs(bin_accuracies[i] - bin_confidences[i]) for i in range(n_bins))
-        
-        # Overconfidence Error (OE) and Underconfidence Error (UE)
-        oe = sum(bin_counts[i] * max(bin_confidences[i] - bin_accuracies[i], 0) for i in range(n_bins))
-        ue = sum(bin_counts[i] * max(bin_accuracies[i] - bin_confidences[i], 0) for i in range(n_bins))
-        
-        # Brier Score decomposition
-        brier_scores = []
-        for i in range(y_proba.shape[1]):
-            y_binary = (y_test == i).astype(int)
-            if len(np.unique(y_binary)) > 1:
-                brier = brier_score_loss(y_binary, y_proba[:, i])
-                brier_scores.append(brier)
-        
-        avg_brier_score = np.mean(brier_scores) if brier_scores else 0
-        
-        # Confidence distribution analysis
-        results = {
-            'ece': ece,
-            'mce': mce,
-            'overconfidence_error': oe,
-            'underconfidence_error': ue,
-            'avg_brier_score': avg_brier_score,
-            'bin_accuracies': bin_accuracies,
-            'bin_confidences': bin_confidences,
-            'bin_counts': bin_counts,
-            'bin_sizes': bin_sizes,
-            'confidence_mean': np.mean(confidence),
-            'confidence_std': np.std(confidence),
-            'well_calibrated': ece < RISK_THRESHOLDS['calibration_error'],
-            'is_overconfident': oe > ue,
-            'calibration_quality': 'excellent' if ece < 0.05 else 'good' if ece < 0.1 else 'poor'
+        self.thresholds = settings.governance.calibration
+
+    def run(
+        self,
+        y_true: np.ndarray,
+        y_prob: np.ndarray,
+        model_name: str = "model",
+    ) -> GateResult:
+        y_true = np.asarray(y_true, dtype=float).ravel()
+        y_prob = np.asarray(y_prob, dtype=float).ravel()
+        n_bins = self.thresholds.n_bins
+
+        ece = expected_calibration_error(y_true, y_prob, n_bins=n_bins)
+        mce = maximum_calibration_error(y_true, y_prob, n_bins=n_bins)
+        brier = float(brier_score_loss(y_true, y_prob))
+        bins = calibration_bins(y_true, y_prob, n_bins=n_bins)
+
+        base_rate = float(y_true.mean())
+        # A constant predictor at the base rate scores base*(1-base); anything
+        # above that is worse than predicting the average for everyone.
+        reference_brier = base_rate * (1.0 - base_rate)
+
+        mean_predicted = float(y_prob.mean())
+        bias = mean_predicted - base_rate
+
+        ece_status = self.thresholds.ece.classify(ece)
+        brier_status = self.thresholds.brier.classify(brier)
+        status = worst_status([ece_status, brier_status])
+
+        findings: list[str] = []
+        if ece_status != "pass":
+            findings.append(
+                f"ECE {ece:.4f} breaches the {ece_status} limit "
+                f"({self.thresholds.ece.describe()}) over {n_bins} reliability bins"
+            )
+        if brier_status != "pass":
+            findings.append(
+                f"Brier score {brier:.4f} breaches the {brier_status} limit "
+                f"({self.thresholds.brier.describe()}); a constant base-rate "
+                f"predictor scores {reference_brier:.4f}"
+            )
+        if abs(bias) > 0.02:
+            findings.append(
+                f"Mean predicted PD {mean_predicted:.4f} is off the observed base rate "
+                f"{base_rate:.4f} by {bias:+.4f}"
+            )
+
+        metrics: dict[str, Any] = {
+            "ece": ece,
+            "mce": mce,
+            "brier_score": brier,
+            "reference_brier_base_rate": reference_brier,
+            "mean_predicted_pd": mean_predicted,
+            "observed_default_rate": base_rate,
+            "calibration_bias": bias,
+            "n_bins_populated": len(bins["weight"]),
         }
-        
-        # Log calibration metrics
-        self.tracker.log_metric("calibration_ece", ece)
-        self.tracker.log_metric("calibration_mce", mce)
-        self.tracker.log_metric("calibration_brier_score", avg_brier_score)
-        
-        return results
+
+        if self.tracker is not None:
+            for key in ("ece", "mce", "brier_score", "calibration_bias"):
+                self.tracker.log_metric(f"{model_name}_calibration_{key}", metrics[key])
+
+        return GateResult(
+            name="calibration",
+            status=status,
+            headline_metric="ece",
+            headline_value=ece,
+            threshold=self.thresholds.ece.describe(),
+            metrics=metrics,
+            findings=findings,
+            details={
+                "model": model_name,
+                "ece_status": ece_status,
+                "brier_status": brier_status,
+                "brier_threshold": self.thresholds.brier.describe(),
+                "reliability_bins": bins,
+            },
+        )

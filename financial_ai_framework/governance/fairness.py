@@ -1,140 +1,210 @@
-"""Fairness analysis for financial AI models."""
+"""Fairness gate: demographic parity and equalized odds on protected attributes.
+
+The attributes audited here (``sex``, ``age_band``) are deliberately withheld from
+the feature matrix - see ``data/processor.py``. Measuring a gap anyway is the
+point: correlated repayment-behaviour features can reintroduce disparate impact
+that excluding the attribute does nothing to prevent.
+
+Definitions used
+----------------
+demographic parity gap
+    ``max - min`` of the predicted default rate across groups. Distribution of
+    the adverse decision, ignoring whether it was correct.
+equalized odds gap
+    The larger of the ``max - min`` true-positive-rate spread and the
+    ``max - min`` false-positive-rate spread. Error rates conditioned on the
+    borrower's actual outcome, which is the parity that matters when the adverse
+    decision is "declined credit".
+"""
+
+from __future__ import annotations
+
+from typing import Any
 
 import numpy as np
 import pandas as pd
-from typing import Dict, Any
-from sklearn.metrics import accuracy_score, f1_score
-from ..config.settings import RISK_THRESHOLDS, INVESTMENT_GRADE_THRESHOLD, ExperimentConfig
+from sklearn.metrics import roc_auc_score
+
+from ..config import Settings
+from .gates import GateResult, worst_status
+
+
+def _rates(y_true: np.ndarray, y_pred: np.ndarray) -> tuple[float, float]:
+    """True-positive and false-positive rate, NaN when the stratum is empty."""
+    positives = y_true == 1
+    negatives = y_true == 0
+    tpr = float(y_pred[positives].mean()) if positives.any() else float("nan")
+    fpr = float(y_pred[negatives].mean()) if negatives.any() else float("nan")
+    return tpr, fpr
+
+
+def _spread(values: list[float]) -> float:
+    """max - min over the finite values, or 0.0 when fewer than two exist."""
+    finite = [v for v in values if np.isfinite(v)]
+    if len(finite) < 2:
+        return 0.0
+    return float(max(finite) - min(finite))
 
 
 class FairnessAnalyzer:
-    """Fairness analysis with comprehensive bias detection."""
-    
-    def __init__(self, config: ExperimentConfig, tracker):
-        self.config = config
+    """Governance gate on demographic parity and equalized odds."""
+
+    def __init__(self, settings: Settings, tracker=None):
+        self.settings = settings
         self.tracker = tracker
-    
-    def comprehensive_fairness_analysis(self, model, X_test: pd.DataFrame, y_test: np.ndarray) -> Dict[str, Any]:
-        """Comprehensive fairness analysis across multiple dimensions."""
-        if not self.config.enable_fairness:
-            return {'status': 'disabled'}
-        
-        print("⚖️ Performing comprehensive fairness analysis...")
-        results = {}
-        
-        # Identify sensitive attributes
-        sensitive_features = []
-        potential_sensitive = ['sector', 'region', 'risk_category', 'data_source']
-        
-        for feature in potential_sensitive:
-            if feature in X_test.columns:
-                # Only include if has reasonable number of groups
-                n_groups = X_test[feature].nunique()
-                if 2 <= n_groups <= 10:
-                    sensitive_features.append(feature)
-        
-        if not sensitive_features:
-            print(" ⚠️ No suitable sensitive features found for fairness analysis")
-            return {'status': 'no_sensitive_features'}
-        
-        y_pred = model.predict(X_test)
-        if hasattr(model, 'predict_proba'):
-            y_proba = model.predict_proba(X_test)
-        else:
-            y_proba = None
-        
-        for feature in sensitive_features:
-            print(f" 📊 Analyzing fairness for: {feature}")
-            feature_results = {}
-            groups = X_test[feature].unique()
-            
-            # Calculate metrics by group
-            group_metrics = {}
-            group_sizes = {}
-            
-            for group in groups:
-                mask = X_test[feature] == group
-                group_size = np.sum(mask)
-                
-                if group_size < 20:  # Skip very small groups
+        self.thresholds = settings.governance.fairness
+
+    def run(
+        self,
+        y_true: np.ndarray,
+        y_prob: np.ndarray,
+        audit: pd.DataFrame,
+        model_name: str = "model",
+    ) -> GateResult:
+        """Measure parity gaps for every configured protected attribute."""
+        y_true = np.asarray(y_true, dtype=int).ravel()
+        y_prob = np.asarray(y_prob, dtype=float).ravel()
+        y_pred = (y_prob >= self.settings.models.decision_threshold).astype(int)
+
+        attributes = self.thresholds.protected_attributes
+        min_group = self.thresholds.min_group_size
+
+        per_attribute: dict[str, Any] = {}
+        # (label, observed value, threshold spec, gate status)
+        scored: list[tuple[str, float, str, str]] = []
+        findings: list[str] = []
+        skipped: list[str] = []
+
+        for attribute in attributes:
+            if attribute not in audit.columns:
+                skipped.append(f"{attribute} (column absent)")
+                continue
+
+            values = audit[attribute].astype(str).to_numpy()
+            groups: dict[str, dict[str, Any]] = {}
+
+            for group in sorted(pd.unique(values)):
+                mask = values == group
+                size = int(mask.sum())
+                if size < min_group:
                     continue
-                
-                y_true_group = y_test[mask]
-                y_pred_group = y_pred[mask]
-                
-                # Basic metrics
-                group_acc = accuracy_score(y_true_group, y_pred_group)
-                group_f1 = f1_score(y_true_group, y_pred_group, average='macro')
-                
-                # Investment grade specific
-                ig_true_group = (y_true_group <= INVESTMENT_GRADE_THRESHOLD).astype(int)
-                ig_pred_group = (y_pred_group <= INVESTMENT_GRADE_THRESHOLD).astype(int)
-                ig_acc = accuracy_score(ig_true_group, ig_pred_group)
-                
-                # Positive rate (investment grade rate)
-                positive_rate = np.mean(ig_pred_group)
-                true_positive_rate = np.mean(ig_true_group)
-                
-                group_metrics[str(group)] = {
-                    'accuracy': group_acc,
-                    'f1_macro': group_f1,
-                    'investment_grade_accuracy': ig_acc,
-                    'predicted_positive_rate': positive_rate,
-                    'true_positive_rate': true_positive_rate,
-                    'count': group_size
+
+                yt, yp, prob = y_true[mask], y_pred[mask], y_prob[mask]
+                tpr, fpr = _rates(yt, yp)
+                try:
+                    group_auc = float(roc_auc_score(yt, prob)) if len(np.unique(yt)) > 1 else float("nan")
+                except ValueError:  # pragma: no cover - degenerate stratum
+                    group_auc = float("nan")
+
+                groups[group] = {
+                    "n": size,
+                    "predicted_default_rate": float(yp.mean()),
+                    "observed_default_rate": float(yt.mean()),
+                    "mean_predicted_pd": float(prob.mean()),
+                    "true_positive_rate": tpr,
+                    "false_positive_rate": fpr,
+                    "roc_auc": group_auc,
                 }
-                group_sizes[str(group)] = group_size
-            
-            feature_results['group_metrics'] = group_metrics
-            feature_results['group_sizes'] = group_sizes
-            
-            # Calculate fairness metrics
-            if len(group_metrics) >= 2:
-                accuracies = [metrics['accuracy'] for metrics in group_metrics.values()]
-                ig_accuracies = [metrics['investment_grade_accuracy'] for metrics in group_metrics.values()]
-                positive_rates = [metrics['predicted_positive_rate'] for metrics in group_metrics.values()]
-                
-                # Demographic parity (difference in positive rates)
-                feature_results['demographic_parity_difference'] = max(positive_rates) - min(positive_rates)
-                
-                # Equalized odds proxy (difference in accuracies)
-                feature_results['accuracy_difference'] = max(accuracies) - min(accuracies)
-                feature_results['ig_accuracy_difference'] = max(ig_accuracies) - min(ig_accuracies)
-                
-                # Statistical parity
-                weighted_avg_positive_rate = np.average(
-                    positive_rates,
-                    weights=[group_sizes[group] for group in group_metrics.keys()]
+
+            if len(groups) < 2:
+                skipped.append(f"{attribute} (fewer than 2 groups of >= {min_group} rows)")
+                continue
+
+            dp_gap = _spread([g["predicted_default_rate"] for g in groups.values()])
+            tpr_gap = _spread([g["true_positive_rate"] for g in groups.values()])
+            fpr_gap = _spread([g["false_positive_rate"] for g in groups.values()])
+            eo_gap = max(tpr_gap, fpr_gap)
+
+            dp_status = self.thresholds.demographic_parity.classify(dp_gap)
+            eo_status = self.thresholds.equalized_odds.classify(eo_gap)
+
+            per_attribute[attribute] = {
+                "groups": groups,
+                "n_groups": len(groups),
+                "demographic_parity_gap": dp_gap,
+                "true_positive_rate_gap": tpr_gap,
+                "false_positive_rate_gap": fpr_gap,
+                "equalized_odds_gap": eo_gap,
+                "demographic_parity_status": dp_status,
+                "equalized_odds_status": eo_status,
+            }
+
+            scored.append(
+                (
+                    f"{attribute} demographic parity gap",
+                    dp_gap,
+                    self.thresholds.demographic_parity.describe(),
+                    dp_status,
                 )
-                feature_results['statistical_parity_difference'] = max(
-                    abs(rate - weighted_avg_positive_rate) for rate in positive_rates
+            )
+            scored.append(
+                (
+                    f"{attribute} equalized odds gap",
+                    eo_gap,
+                    self.thresholds.equalized_odds.describe(),
+                    eo_status,
                 )
-                
-                # Check for violations
-                feature_results['fairness_violations'] = {
-                    'demographic_parity': feature_results['demographic_parity_difference'] > RISK_THRESHOLDS['fairness_violation'],
-                    'accuracy_disparity': feature_results['accuracy_difference'] > RISK_THRESHOLDS['fairness_violation'],
-                    'statistical_parity': feature_results['statistical_parity_difference'] > RISK_THRESHOLDS['fairness_violation']
-                }
-                
-                feature_results['any_violation'] = any(feature_results['fairness_violations'].values())
-                
-                # Log fairness metrics
-                self.tracker.log_metric(f"fairness_{feature}_demographic_parity", feature_results['demographic_parity_difference'])
-                self.tracker.log_metric(f"fairness_{feature}_accuracy_diff", feature_results['accuracy_difference'])
-            
-            results[feature] = feature_results
-        
-        # Overall fairness summary
-        total_violations = sum(
-            1 for feature_results in results.values()
-            if isinstance(feature_results, dict) and feature_results.get('any_violation', False)
+            )
+
+            if dp_status != "pass":
+                findings.append(
+                    f"{attribute}: demographic parity gap {dp_gap:.4f} ({dp_status}, "
+                    f"{self.thresholds.demographic_parity.describe()}) across "
+                    f"{len(groups)} groups"
+                )
+            if eo_status != "pass":
+                driver = "TPR" if tpr_gap >= fpr_gap else "FPR"
+                findings.append(
+                    f"{attribute}: equalized odds gap {eo_gap:.4f} ({eo_status}, "
+                    f"{self.thresholds.equalized_odds.describe()}), driven by the "
+                    f"{driver} spread (TPR {tpr_gap:.4f} / FPR {fpr_gap:.4f})"
+                )
+
+            if self.tracker is not None:
+                self.tracker.log_metric(f"{model_name}_fairness_{attribute}_dp_gap", dp_gap)
+                self.tracker.log_metric(f"{model_name}_fairness_{attribute}_eo_gap", eo_gap)
+
+        if not scored:
+            return GateResult(
+                name="fairness",
+                status="warn",
+                headline_metric="worst_parity_gap",
+                headline_value=float("nan"),
+                threshold=self.thresholds.demographic_parity.describe(),
+                metrics={"attributes_analysed": 0},
+                findings=[
+                    "No protected attribute could be audited: " + "; ".join(skipped)
+                ],
+                details={"model": model_name, "skipped": skipped},
+            )
+
+        status = worst_status(s for _, _, _, s in scored)
+        # Headline = the largest gap among those at the worst observed status.
+        driving = max((s for s in scored if s[3] == status), key=lambda s: s[1])
+
+        return GateResult(
+            name="fairness",
+            status=status,
+            headline_metric=driving[0].replace(" ", "_"),
+            headline_value=driving[1],
+            threshold=driving[2],
+            metrics={
+                "attributes_analysed": len(per_attribute),
+                "worst_gap": driving[1],
+                "worst_gap_metric": driving[0],
+                **{
+                    f"{attr}_{key}": data[key]
+                    for attr, data in per_attribute.items()
+                    for key in ("demographic_parity_gap", "equalized_odds_gap")
+                },
+            },
+            findings=findings,
+            details={
+                "model": model_name,
+                "decision_threshold": self.settings.models.decision_threshold,
+                "min_group_size": min_group,
+                "withheld_from_features": True,
+                "skipped": skipped,
+                "attributes": per_attribute,
+            },
         )
-        
-        results['summary'] = {
-            'features_analyzed': len(sensitive_features),
-            'violations_detected': total_violations,
-            'violation_rate': total_violations / len(sensitive_features) if sensitive_features else 0
-        }
-        
-        return results
