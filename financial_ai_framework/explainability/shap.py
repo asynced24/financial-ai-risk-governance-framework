@@ -3,7 +3,7 @@
 Produces two artefacts a model-risk reviewer actually asks for:
 
 * **Global attribution** - mean absolute SHAP value per feature, i.e. how much
-  each feature moves the predicted PD on average across the evaluation sample.
+  each feature moves the model's output on average across the evaluation sample.
 * **Local explanations** - a full per-feature contribution breakdown for a handful
   of individual borrowers, written to ``reports/`` as JSON so they can be pasted
   into an adverse-action review.
@@ -11,6 +11,12 @@ Produces two artefacts a model-risk reviewer actually asks for:
 Explainer selection is by model family: exact tree SHAP for the gradient-boosted
 models, exact linear SHAP for the scaled logistic-regression pipeline. Neither
 path uses sampling approximation, so the numbers are reproducible.
+
+Both paths output on the **log-odds** scale, not the probability scale - the
+boosters are ``binary:logistic`` and the linear explainer works on the decision
+function. Contributions are additive there: ``sigmoid(base_value + sum(shap))``
+recovers the predicted PD exactly. Read a mean absolute SHAP value as movement in
+log-odds, and do not report it as a change in PD.
 """
 
 from __future__ import annotations
@@ -92,7 +98,7 @@ class ShapAnalyzer:
         print(f"[shap] explaining {model_name} on {n_sample} rows ({n_background} background rows)")
 
         try:
-            shap_values, base_value, explainer_kind = self._compute(model, X_ref, X_eval)
+            shap_values, base_value, explainer_kind, units = self._compute(model, X_ref, X_eval)
         except Exception as exc:  # pragma: no cover - depends on shap internals
             print(f"[shap] explanation failed: {exc}")
             return {"status": "failed", "error": str(exc), "model": model_name}
@@ -112,7 +118,7 @@ class ShapAnalyzer:
                     "explainer": explainer_kind,
                     "sample_size": int(n_sample),
                     "metric": "mean_absolute_shap_value",
-                    "units": "probability_of_default",
+                    "units": units,
                     "global_importance": global_importance,
                 },
                 indent=2,
@@ -129,6 +135,7 @@ class ShapAnalyzer:
             feature_names=feature_names,
             model_name=model_name,
             explainer_kind=explainer_kind,
+            units=units,
             reports_dir=reports_dir,
         )
         if local_path:
@@ -168,8 +175,13 @@ class ShapAnalyzer:
         model: Any,
         X_ref: pd.DataFrame,
         X_eval: pd.DataFrame,
-    ) -> tuple[np.ndarray, float, str]:
-        """Pick the exact explainer for the model family and evaluate it."""
+    ) -> tuple[np.ndarray, float, str, str]:
+        """Pick the exact explainer for the model family and evaluate it.
+
+        Returns ``(shap values, base value, explainer label, output units)``. Both
+        paths are log-odds; the units travel with the values so the artefact never
+        has to guess which scale it is on.
+        """
         preprocessing, estimator = _split_pipeline(model)
         n_features = X_eval.shape[1]
 
@@ -181,13 +193,19 @@ class ShapAnalyzer:
             explainer = shap.LinearExplainer(estimator, np.asarray(ref, dtype=float))
             values = explainer(np.asarray(evaluated, dtype=float))
             base = float(np.mean(np.asarray(values.base_values, dtype=float)))
-            return _normalise_shap(values, n_features), base, "LinearExplainer(log-odds)"
+            return (
+                _normalise_shap(values, n_features),
+                base,
+                "LinearExplainer(log-odds)",
+                "log_odds",
+            )
 
         explainer = shap.TreeExplainer(estimator)
         values = explainer(X_eval)
         base_values = np.asarray(getattr(values, "base_values", 0.0), dtype=float)
         base = float(base_values.mean()) if base_values.size else 0.0
-        return _normalise_shap(values, n_features), base, "TreeExplainer(exact)"
+        # binary:logistic boosters: TreeExplainer margins are log-odds, not PD.
+        return _normalise_shap(values, n_features), base, "TreeExplainer(exact)", "log_odds"
 
     def _write_local_explanations(
         self,
@@ -198,6 +216,7 @@ class ShapAnalyzer:
         feature_names: list[str],
         model_name: str,
         explainer_kind: str,
+        units: str,
         reports_dir: Path,
     ) -> Path | None:
         """Write per-borrower contribution breakdowns for a few sample rows."""
@@ -256,10 +275,12 @@ class ShapAnalyzer:
                 {
                     "model": model_name,
                     "explainer": explainer_kind,
+                    "units": units,
                     "note": (
-                        "Local SHAP contributions for individual borrowers. Values are "
-                        "additive on the explainer's output scale and sum with the base "
-                        "value to that borrower's score."
+                        "Local SHAP contributions for individual borrowers, on the "
+                        "log-odds scale. base_value + sum_of_contributions is a "
+                        "log-odds score, not a probability; apply a sigmoid to it to "
+                        "recover predicted_pd."
                     ),
                     "explanations": explanations,
                 },
