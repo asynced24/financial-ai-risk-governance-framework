@@ -1,4 +1,4 @@
-"""Typed configuration for the Financial AI Risk & Governance Framework.
+"""Typed configuration for the Bayesian Credit Risk Gate.
 
 Every governance threshold in the framework is declared in ``config.yaml`` at the
 repository root and validated here by pydantic v2 at startup. No gate module
@@ -67,7 +67,7 @@ class GateThreshold(_Base):
 
 
 class ProjectSettings(_Base):
-    name: str = "financial-ai-risk-governance-framework"
+    name: str = "bayesian-credit-risk-gate"
     version: str = "2.0.0"
     random_seed: int = Field(SEED, ge=0)
 

@@ -1,4 +1,4 @@
-# Financial AI Risk & Governance Framework - runtime configuration
+# Bayesian Credit Risk Gate - runtime configuration
 #
 # Every governance threshold used anywhere in the framework lives in this file.
 # It is parsed into the pydantic v2 `Settings` model in
@@ -9,7 +9,7 @@
 # its observed metric as pass / warn / fail against these limits.
 
 project:
-  name: financial-ai-risk-governance-framework
+  name: bayesian-credit-risk-gate
   version: "2.0.0"
   random_seed: 42
 

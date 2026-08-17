@@ -1,1 +1,1 @@
-"""Test suite for the Financial AI Risk & Governance Framework."""
+"""Test suite for the Bayesian Credit Risk Gate."""

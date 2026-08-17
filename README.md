@@ -1,6 +1,6 @@
-# Financial AI Risk & Governance Framework
+# Bayesian Credit Risk Gate
 
-[![CI](https://github.com/asynced24/financial-ai-risk-governance-framework/actions/workflows/ci.yml/badge.svg)](https://github.com/asynced24/financial-ai-risk-governance-framework/actions/workflows/ci.yml)
+[![CI](https://github.com/asynced24/bayesian-credit-risk-gate/actions/workflows/ci.yml/badge.svg)](https://github.com/asynced24/bayesian-credit-risk-gate/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
 
@@ -114,8 +114,8 @@ Requires Python 3.12 or newer - the pinned numpy, scipy, xgboost and shap releas
 all declare `Requires-Python >= 3.12`.
 
 ```bash
-git clone https://github.com/asynced24/financial-ai-risk-governance-framework.git
-cd financial-ai-risk-governance-framework
+git clone https://github.com/asynced24/bayesian-credit-risk-gate.git
+cd bayesian-credit-risk-gate
 
 pip install -r requirements.txt
 python main.py --sample

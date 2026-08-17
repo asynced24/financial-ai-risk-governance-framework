@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Financial AI Risk & Governance Framework - pipeline entry point.
+"""Bayesian Credit Risk Gate - pipeline entry point.
 
 Runs the full pipeline end to end: load data, benchmark every enabled model,
 fit the empirical-Bayes segment shrinkage model, put each model through the five

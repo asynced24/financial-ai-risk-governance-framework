@@ -1,4 +1,4 @@
-"""Financial AI Risk & Governance Framework.
+"""Bayesian Credit Risk Gate.
 
 A benchmark-plus-governance pipeline for credit-default (probability of default)
 models: train several model families under one protocol, put each of them through
