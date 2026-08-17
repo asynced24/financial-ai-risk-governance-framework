@@ -14,8 +14,8 @@ per model.
 A credit-risk model that ranks well is not the same as a credit-risk model you can
 deploy. The number has to mean what it says, it has to hold up across demographic
 segments, and someone has to be able to explain any individual decision. In
-practice those questions get asked in a review meeting weeks after training, by
-which point the answer is a slide rather than a test.
+practice those questions usually get asked in a review meeting weeks after
+training, and get answered from a deck rather than from a check that runs.
 
 This project treats them as gates in the pipeline instead. Every threshold lives in
 `config.yaml`, is validated by pydantic at startup, and produces a pass/warn/fail
@@ -27,10 +27,14 @@ verdict on every run. Three things follow from that:
   one default has a raw default rate of 5.9%, which is noise. The empirical-Bayes
   model shrinks it toward the population rate by an amount that falls out of the
   posterior, not out of a tuned constant.
-- **Fairness is measured on attributes the model never saw.** `sex` and `marriage`
-  are withheld from the feature matrix as prohibited bases but retained for
-  auditing, because correlated behavioural features can reintroduce a gap that
-  excluding the attribute does nothing to prevent. The run below shows exactly that.
+- **Fairness is measured on an attribute the model never saw.** `sex` and
+  `marriage` are withheld from the feature matrix entirely as prohibited bases and
+  kept only for auditing. The logistic regression model's predictions still show an
+  equalized-odds gap of **0.1617** on `sex`, past the 0.10 fail limit - real
+  evidence that fairness is not fixed by removing protected columns. `age`, unlike
+  sex or marital status, is used directly as a feature - 8th to 12th of 49 by SHAP
+  importance depending on the model - and is separately audited via `age_band`; a
+  gap there reflects age being used as intended, not a proxy leak.
 
 The sample run ends in an overall **FAIL** verdict. That is the intended result, not
 a broken build: a governance harness tuned so that everything passes is not
@@ -165,8 +169,7 @@ holds XGBoost's attributions rather than these.
 
 ### Reproducibility note
 
-Worth stating plainly, because it is the kind of thing a governance review should
-catch. Across Windows and Linux on the same seed and the same sample hash:
+Across Windows and Linux, on the same seed and the same sample hash:
 
 - `logistic_regression` and `lightgbm` reproduce **bit-identically** - every metric,
   every gate verdict, every credible interval.
@@ -184,10 +187,11 @@ the platform or set `models.enabled` to a single model in `config.yaml`.
 
 ### A flagged example: fair on parity, unfair on error rates
 
-The `age_band` fairness gate fails for every model, and the way it fails is the
-point. LightGBM's predicted default rate is nearly flat across age bands - a
-demographic parity gap of just **0.0192**, comfortably passing. But recall on
-borrowers who actually defaulted is not flat at all:
+Both audited attributes pass demographic parity and fail equalized odds, and the
+way they fail is the point. Taking `age_band` on LightGBM first: predicted default
+rate is nearly flat across age bands - a demographic parity gap of just **0.0192**,
+comfortably passing. But recall on borrowers who actually defaulted is not flat at
+all:
 
 | Age band | n | Predicted default rate | Observed default rate | TPR | FPR |
 |---|---|---|---|---|---|
@@ -199,11 +203,30 @@ borrowers who actually defaulted is not flat at all:
 Equalized odds gap **0.1600**, against a fail limit of 0.10, driven entirely by the
 TPR spread. A defaulting 50-59-year-old is caught 25% of the time; a defaulting
 30-39-year-old, 41%. A parity-only fairness check would have signed this model off.
-Neither `sex` nor `marriage` is in the feature matrix, so this gap is reintroduced
-purely through correlated repayment behaviour - which is the whole argument for
-auditing withheld attributes rather than assuming exclusion is sufficient.
 
-The 60-80 band is excluded from the gate: 10 test rows is below the configured
+`age` is a model feature here - 12th of 49 by SHAP importance on LightGBM, 8th on
+XGBoost - so this gap is at least partly the model using an input it was handed.
+That makes it a question about whether the use is justified, not proof of a hidden
+proxy.
+
+The withheld-attribute case is `sex`, and the sharper result there is on
+**logistic regression** rather than LightGBM:
+
+| `sex` | n | Predicted default rate | Observed default rate | TPR | FPR |
+|---|---|---|---|---|---|
+| male (1) | 495 | 0.1333 | 0.2283 | **0.4071** | 0.0524 |
+| female (2) | 755 | 0.0874 | 0.2159 | **0.2454** | 0.0439 |
+
+Demographic parity gap 0.0459, passing. Equalized odds gap **0.1617**, failing,
+again on the TPR spread alone - the FPR spread is 0.0084. `sex` is not in the
+feature matrix and neither is `marriage`, so the model produced that gap without
+ever reading the column; the effect arrives through correlated repayment behaviour.
+That is the case excluding a protected column does not cover, and the reason the
+gate audits withheld attributes instead of treating exclusion as sufficient.
+Logistic regression is also one of the two models that reproduce bit-identically
+across platforms, so this figure is not machine-dependent.
+
+The 60-80 age band is excluded from the gate: 10 test rows is below the configured
 `min_group_size` of 50, and reporting a TPR on that is worse than reporting nothing.
 
 ### What the Bayesian shrinkage does
@@ -244,7 +267,7 @@ aggregate metric on the leaderboard surfaces.
 | Config | pydantic v2 `Settings` loaded from `config.yaml`, `extra="forbid"` |
 | Explainability | `shap` exact TreeExplainer / LinearExplainer |
 | Tracking | MLflow, with a local JSON run log as fallback |
-| Tests | pytest, 115 tests |
+| Tests | pytest |
 | Lint | ruff |
 | CI | GitHub Actions: lint, tests on 3.12/3.13, end-to-end smoke |
 
@@ -287,7 +310,7 @@ usable for provisioning.
 |   |   `-- feature_importance.py    cross-model native importance consensus
 |   `-- utils/
 |       `-- tracking.py              ExperimentTracker (MLflow / local JSON)
-|-- tests/                           115 tests
+|-- tests/                           pytest suite, one module per component
 `-- .github/workflows/ci.yml         lint, test matrix, end-to-end smoke
 ```
 
@@ -295,7 +318,7 @@ usable for provisioning.
 
 ```bash
 pip install -r requirements.txt -r requirements-dev.txt
-pytest          # 115 tests
+pytest
 ruff check .
 ```
 
@@ -309,8 +332,9 @@ Three CI jobs run on every push and pull request:
    that the shrinkage prior was actually fitted. Reports upload as a build artifact.
 
 The tests are written so that each gate has to fire on a known-bad synthetic input
-and stay quiet on a known-good one - a gate that cannot tell those apart is
-decoration. The Bayesian module is tested against the posterior algebra directly:
+and stay quiet on a known-good one, since a gate that does not distinguish the two
+would still report a verdict. The Bayesian module is tested against the posterior
+algebra directly:
 that the blend weight equals `n / (n + a + b)`, that the posterior mean is the
 implied weighted average of the raw and population rates, that shrinkage is monotone
 in segment size, and that thin segments get wider intervals.
