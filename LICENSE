@@ -19,16 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-The dataset sample committed under data/sample/ is derived from the UCI Machine
-Learning Repository dataset 350, "Default of Credit Card Clients", which is
-distributed under the Creative Commons Attribution 4.0 International (CC BY 4.0)
-licence. Attribution:
-
-  Yeh, I. C., & Lien, C. H. (2009). The comparisons of data mining techniques for
-  the predictive accuracy of probability of default of credit card clients.
-  Expert Systems with Applications, 36(2), 2473-2480.
-
-  https://archive.ics.uci.edu/dataset/350/default+of+credit+card+clients

@@ -297,5 +297,5 @@ reason.
 
 Aryan Singh - [github.com/asynced24](https://github.com/asynced24)
 
-MIT licensed, see [LICENSE](LICENSE). The committed data sample carries its own
-CC BY 4.0 attribution, also recorded there.
+Code is MIT licensed, see [LICENSE](LICENSE). The committed data sample carries its
+own CC BY 4.0 attribution, recorded in [NOTICE](NOTICE).

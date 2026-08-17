@@ -1,0 +1,25 @@
+Third-party data attribution
+============================
+
+The source code in this repository is MIT licensed (see LICENSE).
+
+The dataset sample committed at data/sample/uci_credit_sample.csv is a 5,000-row
+class-stratified draw from the UCI Machine Learning Repository dataset 350,
+"Default of Credit Card Clients", which is distributed under the Creative Commons
+Attribution 4.0 International licence (CC BY 4.0).
+
+Required attribution:
+
+  Yeh, I. C., & Lien, C. H. (2009). The comparisons of data mining techniques for
+  the predictive accuracy of probability of default of credit card clients.
+  Expert Systems with Applications, 36(2), 2473-2480.
+
+  UCI Machine Learning Repository, dataset 350.
+  https://archive.ics.uci.edu/dataset/350/default+of+credit+card+clients
+
+Licence text: https://creativecommons.org/licenses/by/4.0/
+
+No changes were made to the underlying records. The sample differs from the source
+only by row subsetting and by the positional column rename documented in
+financial_ai_framework/data/loader.py, which maps the upstream X1..X23 / Y names to
+the canonical names used in the source paper.
