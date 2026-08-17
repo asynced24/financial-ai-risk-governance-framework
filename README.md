@@ -128,18 +128,20 @@ python main.py --help
 
 ## Sample output
 
-Real output from `python main.py --sample`, seed 42, sample hash `b1ba275532b83033`.
+Real output from `python main.py --sample`, seed 42, sample hash `b1ba275532b83033`,
 3,750 train / 1,250 test rows, 49 predictors (28 engineered from billing history).
+The table below is the CI run on Linux / Python 3.13 - download the
+`governance-reports` artifact from any green build to check it.
 
 | Model | ROC-AUC | PR-AUC | KS | Brier | Log-loss | ECE | CV mean | CV std | Gates |
 |---|---|---|---|---|---|---|---|---|---|
+| `xgboost` | 0.7672 | 0.5420 | 0.4251 | 0.1372 | 0.4452 | 0.0320 | 0.7632 | 0.0221 | FAIL |
 | `lightgbm` | 0.7634 | 0.5355 | 0.4220 | 0.1374 | 0.4469 | 0.0411 | 0.7671 | 0.0179 | FAIL |
-| `xgboost` | 0.7625 | 0.5318 | 0.4215 | 0.1379 | 0.4474 | 0.0438 | 0.7653 | 0.0154 | FAIL |
 | `logistic_regression` | 0.7607 | 0.5042 | 0.4155 | 0.1403 | 0.4459 | 0.0333 | 0.7511 | 0.0224 | FAIL |
 
 Gate matrix:
 
-| Gate | `lightgbm` | `xgboost` | `logistic_regression` |
+| Gate | `xgboost` | `lightgbm` | `logistic_regression` |
 |---|---|---|---|
 | fairness | FAIL | FAIL | FAIL |
 | drift | PASS | PASS | PASS |
@@ -147,15 +149,38 @@ Gate matrix:
 | uncertainty | PASS | PASS | PASS |
 | segment_stability | FAIL | FAIL | WARN |
 
-LightGBM wins on ROC-AUC by 0.0009 over XGBoost, which is inside the fold-to-fold
-noise (CV std 0.018) - the interesting part of this run is not the leaderboard.
+The top two models are separated by 0.0038 of ROC-AUC against a fold-to-fold CV std
+of 0.018-0.022. Treating that as a ranking would be overreading it; the useful
+signal in this run is the gate matrix, not the leaderboard.
 
-Supporting numbers for the selected model: max feature PSI 0.0156 across all 49
-features (no drift, as expected on a random split); 17.8% of the test set above the
-0.60-nat entropy threshold; ROC-AUC 95% bootstrap interval [0.7022, 0.8097]. Top SHAP
-drivers: `pay_status_1` (0.359), `max_delinquency` (0.152), `limit_bal` (0.135),
-`delinquent_months` (0.122) - most recent repayment status dominates, which is what
-the source paper found too.
+The worked examples below all use **LightGBM**, whose numbers are bit-identical on
+Windows and Linux (see the reproducibility note). Supporting figures for it: max
+feature PSI 0.0156 across all 49 features (no drift, as expected on a random split);
+17.8% of the test set above the 0.60-nat entropy threshold; ROC-AUC 95% bootstrap
+interval [0.7022, 0.8097]. Top SHAP drivers: `pay_status_1` (0.359),
+`max_delinquency` (0.152), `limit_bal` (0.135), `delinquent_months` (0.122) - most
+recent repayment status dominates, which is what the source paper found too. SHAP
+runs on whichever model the selection metric picks, so the committed CI artifact
+holds XGBoost's attributions rather than these.
+
+### Reproducibility note
+
+Worth stating plainly, because it is the kind of thing a governance review should
+catch. Across Windows and Linux on the same seed and the same sample hash:
+
+- `logistic_regression` and `lightgbm` reproduce **bit-identically** - every metric,
+  every gate verdict, every credible interval.
+- The Bayesian layer reproduces bit-identically everywhere; it is pure numpy/scipy.
+- `xgboost` does **not**. Its histogram tree builder reduces floating-point sums in a
+  thread- and platform-dependent order, so the same seed gives ROC-AUC 0.7672 on
+  Linux and 0.7625 on Windows (ECE 0.0320 vs 0.0438).
+
+That 0.0047 spread is larger than the 0.0038 gap between the top two models, so
+**which model "wins" depends on the machine you run it on**: XGBoost on Linux,
+LightGBM on Windows. Every gate verdict in the matrix above is identical on both,
+which is the reassuring part - the approval decision is stable even where the
+leaderboard is not. If you need a stable winner rather than a stable verdict, pin
+the platform or set `models.enabled` to a single model in `config.yaml`.
 
 ### A flagged example: fair on parity, unfair on error rates
 
