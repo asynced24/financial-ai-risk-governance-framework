@@ -47,6 +47,13 @@ htmlcov/
 outputs/
 results/
 
+# LaTeX build intermediates. The whitepaper PDF itself is committed.
+*.aux
+*.toc
+*.out
+*.synctex.gz
+/docs/*.log
+
 # OS & IDE
 .DS_Store
 Thumbs.db

@@ -9,6 +9,10 @@ through five governance gates - fairness, drift, calibration, uncertainty, and a
 Bayesian segment-stability check - emitting a governance scorecard and a model card
 per model.
 
+A technical writeup covering the methodology, the shrinkage math, and the
+governance findings, with generated figures, is at
+[`docs/whitepaper.pdf`](docs/whitepaper.pdf).
+
 ## Why
 
 A credit-risk model that ranks well is not the same as a credit-risk model you can
