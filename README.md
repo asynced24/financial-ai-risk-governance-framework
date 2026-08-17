@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/asynced24/financial-ai-risk-governance-framework/actions/workflows/ci.yml/badge.svg)](https://github.com/asynced24/financial-ai-risk-governance-framework/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
 
 Benchmarks credit-default models against each other and then puts every one of them
 through five governance gates - fairness, drift, calibration, uncertainty, and a
@@ -101,6 +101,9 @@ a UCI outage, and what lets anyone reproduce the numbers below in one command.
 Regenerate it with `python main.py --refresh-sample`.
 
 ## Quickstart
+
+Requires Python 3.12 or newer - the pinned numpy, scipy, xgboost and shap releases
+all declare `Requires-Python >= 3.12`.
 
 ```bash
 git clone https://github.com/asynced24/financial-ai-risk-governance-framework.git
@@ -218,7 +221,7 @@ aggregate metric on the leaderboard surfaces.
 | Tracking | MLflow, with a local JSON run log as fallback |
 | Tests | pytest, 115 tests |
 | Lint | ruff |
-| CI | GitHub Actions: lint, tests on 3.11/3.12/3.13, end-to-end smoke |
+| CI | GitHub Actions: lint, tests on 3.12/3.13, end-to-end smoke |
 
 Class weights are left at their natural values throughout. Rebalancing would lift
 ROC-AUC and destroy the calibration that the ECE and Brier gates exist to measure,
@@ -274,7 +277,7 @@ ruff check .
 Three CI jobs run on every push and pull request:
 
 1. **lint** - `ruff check .`
-2. **test** - pytest on Python 3.11, 3.12 and 3.13
+2. **test** - pytest on Python 3.12 and 3.13
 3. **smoke** - `python main.py --sample` end to end, then a verification step that
    asserts both scorecards and all three model cards were written, that three models
    were benchmarked with all five gates each, that every ROC-AUC beat chance, and
