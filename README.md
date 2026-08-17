@@ -4,153 +4,95 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
 
-Benchmarks credit-default models against each other and then puts every one of them
-through five governance gates - fairness, drift, calibration, uncertainty, and a
-Bayesian segment-stability check - emitting a governance scorecard and a model card
-per model.
+A model that predicts credit-card default isn't automatically safe to use. This
+project trains three of them (logistic regression, XGBoost, LightGBM) on a public
+dataset, then runs each one through five automated checks before deciding whether
+it's actually deployable: is it fair across demographic groups, has the data drifted,
+is it calibrated, is it overconfident, and does it handle small subgroups honestly?
 
-A technical writeup covering the methodology, the shrinkage math, and the
-governance findings, with generated figures, is at
-[`docs/whitepaper.pdf`](docs/whitepaper.pdf).
+Each check outputs pass, warn, or fail. Nothing is hand-waved — every number below
+comes from actually running the code, and a full technical writeup with the math and
+extra figures is at [`docs/whitepaper.pdf`](docs/whitepaper.pdf) if you want the
+long version.
 
-## Why
+## Why bother with gates at all
 
-A credit-risk model that ranks well is not the same as a credit-risk model you can
-deploy. The number has to mean what it says, it has to hold up across demographic
-segments, and someone has to be able to explain any individual decision. In
-practice those questions usually get asked in a review meeting weeks after
-training, and get answered from a deck rather than from a check that runs.
+A model can post a great AUC and still be a bad idea to ship. The usual place that
+gets caught is a review meeting weeks after training, argued from a slide. Here it's
+argued from a script that runs in 15 seconds and gives the same answer every time.
 
-This project treats them as gates in the pipeline instead. Every threshold lives in
-`config.yaml`, is validated by pydantic at startup, and produces a pass/warn/fail
-verdict on every run. Three things follow from that:
+Two things came out of building this that were worth knowing before I ran it:
 
-- **A model can win on AUC and still be blocked.** Selection and approval are
-  separate steps here, as they should be.
-- **Thin demographic segments are handled properly.** A cell with 17 borrowers and
-  one default has a raw default rate of 5.9%, which is noise. The empirical-Bayes
-  model shrinks it toward the population rate by an amount that falls out of the
-  posterior, not out of a tuned constant.
-- **Fairness is measured on an attribute the model never saw.** `sex` and
-  `marriage` are withheld from the feature matrix entirely as prohibited bases and
-  kept only for auditing. The logistic regression model's predictions still show an
-  equalized-odds gap of **0.1617** on `sex`, past the 0.10 fail limit - a withheld
-  column is not a removed effect. The number itself carries a 95% interval of
-  [0.050, 0.274] and drops to 0.0245 on the full 30,000 rows, so read it as evidence
-  of the mechanism rather than a measurement of its size; both are worked through
-  [below](#a-flagged-example-fair-on-parity-unfair-on-error-rates). `age`, unlike
-  sex or marital status, is used directly as a feature - 8th to 12th of 49 by SHAP
-  importance depending on the model - and is separately audited via `age_band`; a
-  gap there reflects age being used as intended, not a proxy leak.
+- **Small subgroups lie if you trust their raw rate.** A group of 17 people with one
+  default has a "default rate" of 5.9%. That's not a real number, it's noise. The
+  Bayesian layer pulls thin groups toward the overall population rate, by an amount
+  that comes out of the math rather than a knob I turned.
+- **Removing a column from the model doesn't remove its effect.** `sex` and
+  `marriage` are never given to the model as inputs. The fairness gate still finds a
+  real gap in how often the model catches actual defaulters, split by sex — because
+  other columns carry enough of the same signal. The gate is there specifically to
+  catch this, since "we didn't include the sensitive column" is not the same claim as
+  "the model doesn't discriminate."
 
-The sample run ends in an overall **FAIL** verdict. That is the intended result, not
-a broken build: a governance harness tuned so that everything passes is not
-measuring anything. The findings are real and reproducible, and they are discussed
-below.
+The sample run below ends in an overall **FAIL**. That's the point of building it —
+a checklist that always says yes isn't checking anything.
 
-## Architecture
+## How it fits together
 
-```
-                      config.yaml  (pydantic v2 Settings, validated at startup)
-                           |
-                           v  thresholds read by every stage
-   data/loader.py ---> data/processor.py ---> models/benchmark.py
-   UCI 350 fetch          feature eng.          LogisticRegression
-   + local cache          + train/test          XGBClassifier
-   + offline sample       + audit cols          LGBMClassifier
-                                               5-fold stratified CV
-                                                     |
-                                    ROC-AUC / PR-AUC / KS / Brier
-                                    log-loss / ECE   |
-                                                     v
-                                      +--------------------------------+
-                                      |    governance gate pipeline    |
-                                      |  fairness  (DP + equalized odds)|
-                                      |  drift     (PSI train vs test)  |
-                                      |  calibration (ECE, Brier)       |
-                                      |  uncertainty (entropy, AUC CI)  |
-                                      |  segment_stability  <-----------+---- bayes/
-                                      +--------------------------------+      segment_
-                                                     |                        shrinkage.py
-                                     pass / warn / fail per gate               (Beta-Binomial
-                                                     |                          empirical Bayes)
-                              +----------------------+---------------+
-                              v                                      v
-                  explainability/shap.py                  governance/reporter.py
-                  global attribution                      governance_scorecard.md
-                  + 3 local explanations                  governance_scorecard.json
-                              |                           model_card_<model>.md
-                              +-------------+-------------+
-                                            v
-                                    utils/tracking.py
-                              MLflow, or local JSON run log
-```
+![Architecture](docs/figures/fig_architecture.png)
 
-## Dataset and licence
+Data loads once, gets split and feature-engineered, then all three models are
+benchmarked with 5-fold cross-validation. Every model goes through the same five
+gates, gets a SHAP explanation, and lands in a scorecard plus a per-model report
+card. Runs log to MLflow if it's around, or to a plain JSON file if not.
 
-UCI Machine Learning Repository dataset **350 - "Default of Credit Card Clients"**:
-30,000 Taiwanese credit-card customers, 23 features covering six months of billing
-and repayment history plus limited demographics, and a binary target for default on
-the next monthly payment. Base default rate 22.1%.
+## The data
 
-> Yeh, I. C., & Lien, C. H. (2009). The comparisons of data mining techniques for the
-> predictive accuracy of probability of default of credit card clients.
-> *Expert Systems with Applications*, 36(2), 2473-2480.
-> <https://archive.ics.uci.edu/dataset/350/default+of+credit+card+clients>
+[UCI dataset 350, "Default of Credit Card Clients"](https://archive.ics.uci.edu/dataset/350/default+of+credit+card+clients)
+— 30,000 real credit-card customers in Taiwan, six months of billing/repayment
+history, and whether they defaulted on the next payment. About 1 in 5 did.
 
-Distributed by UCI under **CC BY 4.0**.
+> Yeh, I. C., & Lien, C. H. (2009). *Expert Systems with Applications*, 36(2), 2473-2480.
 
-The upstream columns are named `X1`...`X23`/`Y`; `data/loader.py` renames them
-positionally to the canonical names from the source paper and folds the undocumented
-`education`/`marriage` codes (0, 5, 6) into the authors' "other" category.
+Licensed CC BY 4.0. A 5,000-row stratified sample is committed to the repo
+(`data/sample/uci_credit_sample.csv`) so the whole thing runs offline — no UCI
+outage can break CI, and anyone cloning this can reproduce every number below
+without an API key or a download. Regenerate it with `python main.py --refresh-sample`.
 
-**Committed offline sample.** `data/sample/uci_credit_sample.csv` is a 5,000-row
-class-stratified draw (448 KB, base rate 22.12% against the full set's 22.12%),
-redistributed under CC BY 4.0 with the attribution above. It exists so the whole
-pipeline runs with no network call - which is what makes the CI smoke job immune to
-a UCI outage, and what lets anyone reproduce the numbers below in one command.
-Regenerate it with `python main.py --refresh-sample`.
+## Running it
 
-## Quickstart
-
-Requires Python 3.12 or newer - the pinned numpy, scipy, xgboost and shap releases
-all declare `Requires-Python >= 3.12`.
+Needs Python 3.12+ (a couple of the pinned dependencies require it).
 
 ```bash
 git clone https://github.com/asynced24/bayesian-credit-risk-gate.git
 cd bayesian-credit-risk-gate
-
 pip install -r requirements.txt
 python main.py --sample
 ```
 
-Runs end to end in roughly 15-20 seconds on a laptop, most of which is importing
-`shap` and `mlflow`. No network, no credentials, no configuration. Reports land in
-`reports/`.
+That's the whole setup. No network call, no API key, no config file to edit first.
+Takes about 15-20 seconds, mostly spent importing `shap` and `mlflow`. Reports land
+in `reports/`.
 
 ```bash
-python main.py                        # full 30,000-row dataset, fetched from UCI and cached
-python main.py --sample --no-shap     # skip explainability
-python main.py --models xgboost       # benchmark a subset
-python main.py --mlflow               # log to MLflow instead of the local JSON run log
-python main.py --refresh-sample       # re-fetch UCI and rewrite the committed sample
+python main.py                     # full 30,000-row dataset instead of the sample
+python main.py --sample --no-shap  # skip the explainability step, faster
+python main.py --models xgboost    # just one model
+python main.py --mlflow            # log to MLflow instead of the local JSON file
 python main.py --help
 ```
 
-## Sample output
+## What an actual run looks like
 
-Real output from `python main.py --sample`, seed 42, sample hash `b1ba275532b83033`,
-3,750 train / 1,250 test rows, 49 predictors (28 engineered from billing history).
-The table below is the CI run on Linux / Python 3.13 - download the
-`governance-reports` artifact from any green build to check it.
+This is real output from `python main.py --sample` (seed 42, 3,750 train / 1,250 test rows):
 
-| Model | ROC-AUC | PR-AUC | KS | Brier | Log-loss | ECE | CV mean | CV std | Gates |
-|---|---|---|---|---|---|---|---|---|---|
-| `xgboost` | 0.7672 | 0.5420 | 0.4251 | 0.1372 | 0.4452 | 0.0320 | 0.7632 | 0.0221 | FAIL |
-| `lightgbm` | 0.7634 | 0.5355 | 0.4220 | 0.1374 | 0.4469 | 0.0411 | 0.7671 | 0.0179 | FAIL |
-| `logistic_regression` | 0.7607 | 0.5042 | 0.4155 | 0.1403 | 0.4459 | 0.0333 | 0.7511 | 0.0224 | FAIL |
+| Model | ROC-AUC | Brier | Gate result |
+|---|---|---|---|
+| `xgboost` | 0.7672 | 0.1372 | FAIL |
+| `lightgbm` | 0.7634 | 0.1374 | FAIL |
+| `logistic_regression` | 0.7607 | 0.1403 | FAIL |
 
-Gate matrix:
+All three fail overall. Breaking that down by gate:
 
 | Gate | `xgboost` | `lightgbm` | `logistic_regression` |
 |---|---|---|---|
@@ -158,218 +100,103 @@ Gate matrix:
 | drift | PASS | PASS | PASS |
 | calibration | WARN | WARN | WARN |
 | uncertainty | PASS | PASS | PASS |
-| segment_stability | FAIL | FAIL | WARN |
+| segment stability | FAIL | FAIL | WARN |
 
-The top two models are separated by 0.0038 of ROC-AUC against a fold-to-fold CV std
-of 0.018-0.022. Treating that as a ranking would be overreading it; the useful
-signal in this run is the gate matrix, not the leaderboard.
+The three models are within 0.007 ROC-AUC of each other, well inside the
+fold-to-fold variance — so the leaderboard ranking isn't really meaningful here.
+The gate matrix is the useful part of this table, not the top row.
 
-The worked examples below all use **LightGBM**, whose numbers are bit-identical on
-Windows and Linux (see the reproducibility note). Supporting figures for it: max
-feature PSI 0.0156 across all 49 features (no drift, as expected on a random split);
-17.8% of the test set above the 0.60-nat entropy threshold, against a warn line at
-35% and a fail line at 55%, so the uncertainty gate is nowhere near firing; ROC-AUC
-95% bootstrap interval [0.7022, 0.8097]. Top SHAP drivers: `pay_status_1` (0.359),
-`max_delinquency` (0.152), `limit_bal` (0.135), `delinquent_months` (0.122) - most
-recent repayment status dominates, which is what the source paper found too. SHAP
-runs on whichever model the selection metric picks, so the committed CI artifact
-holds XGBoost's attributions rather than these.
+### The fairness finding, briefly
 
-### Reproducibility note
+Logistic regression never sees the `sex` column, and its predictions still show a
+real gap: it correctly flags 41% of male defaulters but only 25% of female
+defaulters (an "equalized odds" gap of 0.16, against a 0.10 limit). That's on the
+5,000-row sample — the same check on the full 30,000 rows shrinks the gap to about a
+sixth of that size and it passes, though a related check on age still fails. Same
+direction, much smaller effect at scale, which is exactly the kind of thing you'd
+expect from a number that started out close to its own margin of error.
 
-Across Windows and Linux, on the same seed and the same sample hash:
+The whitepaper walks through the actual confidence interval, checks the result at
+different decision thresholds, and tests how recoverable `sex` is from the columns
+the model *is* given. Worth reading if this result matters to you — the short
+version above leaves out the uncertainty on purpose to stay readable.
 
-- `logistic_regression` and `lightgbm` reproduce **bit-identically** - every metric,
-  every gate verdict, every credible interval.
-- The Bayesian layer reproduces bit-identically on both platforms too. Being
-  numpy/scipy only, with no threaded reduction of its own, makes that likely rather
-  than guaranteed - cross-platform bit-identity really turns on the BLAS build
-  underneath, not on the choice of library.
-- `xgboost` does **not**. Its histogram tree builder reduces floating-point sums in a
-  thread- and platform-dependent order, so the same seed gives ROC-AUC 0.7672 on
-  Linux and 0.7625 on Windows (ECE 0.0320 vs 0.0438).
+### Cross-platform note
 
-That 0.0047 spread is larger than the 0.0038 gap between the top two models, so
-**which model "wins" depends on the machine you run it on**: XGBoost on Linux,
-LightGBM on Windows. Every gate verdict in the matrix above is identical on both,
-which is the reassuring part - the approval decision is stable even where the
-leaderboard is not. If you need a stable winner rather than a stable verdict, pin
-the platform or set `models.enabled` to a single model in `config.yaml`.
+Run this on both Windows and Linux and `logistic_regression`/`lightgbm` come back
+bit-for-bit identical. `xgboost` doesn't — its tree builder sums floating-point
+values in a platform-dependent order, so its score moves by about 0.005 between the
+two, which is enough to change which model "wins" the leaderboard depending on which
+machine you're on. Every gate *verdict* is identical on both platforms regardless —
+the pass/fail decision is stable even when the exact ranking isn't.
 
-### A flagged example: fair on parity, unfair on error rates
+## The Bayesian part
 
-Both audited attributes pass demographic parity and fail equalized odds, and the
-way they fail is the point. Taking `age_band` on LightGBM first: predicted default
-rate is nearly flat across age bands - a demographic parity gap of just **0.0192**,
-comfortably passing. But recall on borrowers who actually defaulted is not flat at
-all:
+Small groups of borrowers give unreliable default-rate estimates on their own. The
+segment-stability gate fixes that by borrowing strength across similar groups: it
+fits a population-level prior from all the groups big enough to trust, then blends
+each individual group's rate toward that prior — more blending for small groups,
+almost none for large ones. The blend weight isn't a setting anyone chose; it falls
+out of how much data each group actually has.
 
-| Age band | n | Predicted default rate | Observed default rate | TPR | FPR |
-|---|---|---|---|---|---|
-| 20-30 | 396 | 0.1162 | 0.2222 | 0.3409 | 0.0519 |
-| 30-40 | 479 | 0.1211 | 0.2088 | **0.4100** | 0.0449 |
-| 40-50 | 257 | 0.1128 | 0.2529 | 0.3538 | 0.0312 |
-| 50-60 | 108 | 0.1019 | 0.1852 | **0.2500** | 0.0682 |
+On this dataset, groups are defined by education level crossed with age band (19
+groups after folding a couple of undocumented codes into "other"). The fitted prior
+works out to roughly a 22.3% population default rate, carrying about as much weight
+as 398 real borrowers would. A group with only 6 people and zero recorded defaults
+doesn't get treated as "0% risk" — it gets pulled to a posterior estimate around
+22%, with an honest interval around it, because 6 data points aren't enough to
+override the prior.
 
-Equalized odds gap **0.1600**, against a fail limit of 0.10, driven entirely by the
-TPR spread. A defaulting 50-59-year-old is caught 25% of the time; a defaulting
-30-39-year-old, 41%. A parity-only fairness check would have signed this model off.
+The stability gate then checks whether each model's predictions match this
+"expected, given how much data we actually have" baseline. LightGBM fails it: it
+systematically underprices default risk for one segment (graduate-educated
+borrowers in their 30s) relative to what their real repayment history supports —
+the kind of thing a plain accuracy number won't show you.
 
-`age` is a model feature here - 12th of 49 by SHAP importance on LightGBM, 8th on
-XGBoost - so this gap is at least partly the model using an input it was handed.
-That makes it a question about whether the use is justified, not proof of a hidden
-proxy.
-
-The withheld-attribute case is `sex`, and the sharper result there is on
-**logistic regression** rather than LightGBM:
-
-| `sex` | n | Defaulters | Predicted default rate | Observed default rate | TPR | FPR |
-|---|---|---|---|---|---|---|
-| male (1) | 495 | 113 | 0.1333 | 0.2283 | **0.4071** | 0.0524 |
-| female (2) | 755 | 163 | 0.0874 | 0.2159 | **0.2454** | 0.0439 |
-
-Demographic parity gap 0.0459, passing. Equalized odds gap **0.1617**, failing,
-again on the TPR spread alone - the FPR spread is 0.0084. `sex` is not in the
-feature matrix and neither is `marriage`, so the model produced that gap without
-ever reading the column. That is the case excluding a protected column does not
-cover, and the reason the gate audits withheld attributes instead of treating
-exclusion as sufficient.
-
-**How strong is that number?** Not as strong as three unqualified decimal places
-suggest, and a project arguing that thin cells need intervals should say so. The TPR
-difference rests on 113 male and 163 female defaulters, giving a Wald standard error
-of 0.0572 and a 95% interval of **[0.050, 0.274]** (a 20,000-draw stratified
-bootstrap agrees: s.e. 0.0570, [0.050, 0.273]). The point estimate is 1.08 standard
-errors past the 0.10 limit. It is also threshold-dependent: 0.5 is the configured
-operating point but classifies only 10.6% of the book as a default against a 22.1%
-base rate, and at the base-rate-matched threshold of 0.3153 the gap is 0.0987 -
-just inside the pass limit. On the full 30,000 rows the gap falls to **0.0245**
-(95% interval [-0.021, 0.070]) and passes, while the fairness gate still fails, on
-`age_band` at 0.1121-0.1417. Same sign, sixth of the magnitude.
-
-So the mechanism holds and the magnitude does not, which is worth stating plainly.
-A withheld attribute *can* produce a measurable error-rate gap, and the gate finds
-it without being told to look for a proxy. How it gets back in is checkable rather
-than assertable: training a model to recover `sex` from the same 49 retained
-predictors reaches a test ROC-AUC of 0.588 (logistic) or 0.607 (LightGBM) against a
-60.4% female base rate, so `sex` is weakly but not negligibly recoverable from the
-repayment history - enough to be a plausible route, not enough to prove it is the
-route. Pinning the channel down needs a feature ablation this pipeline does not run.
-
-Logistic regression is also one of the two models that reproduce bit-identically
-across platforms, so this figure is not machine-dependent.
-
-The 60-80 age band is excluded from the gate: 10 test rows is below the configured
-`min_group_size` of 50, and reporting a TPR on that is worse than reporting nothing.
-
-### What the Bayesian shrinkage does
-
-Segments are `education` x age-band: four education levels after the undocumented
-codes are folded into "other", crossed with the five bands cut on the edges
-`[20, 30, 40, 50, 60, 80]` from `config.yaml` (left-closed). That is 20 possible
-cells, of which 19 appear here - `other_unknown | 60-80` has four borrowers in the
-full 30,000 rows and none of them land in the 5,000-row draw. Education and age are
-used because they are the two demographic columns the model is allowed to use as
-predictors; segmenting on `sex` or `marriage` would define the governance unit in
-terms of a column no lending decision may depend on.
-
-Fitted prior across those 19 segments: **Beta(88.87, 309.62)**, population default
-rate 0.2230, prior worth 398 equivalent borrowers. Method of moments, with the
-binomial sampling variance subtracted from the observed spread of segment rates
-first - skip that step and the prior comes out too diffuse and under-shrinks. The
-spread is taken unweighted across segments, since each segment contributes one draw
-of its latent rate; size-weighting the same 12 contributing segments gives 352.70
-equivalent borrowers instead of 398.49 and changes no verdict here.
-
-Two limitations, stated rather than buried: the prior is estimated from the 12
-segments that clear the 30-borrower floor and then treated as known when the
-credible intervals are formed, so those intervals are conditional on the fitted
-hyperparameters and understate the true uncertainty; and exchangeability across
-education x age-band cells is assumed, not tested. A covariate-adjusted small-area
-model (Fay-Herriot) would be the natural extension.
-
-7 of the 19 segments sit below the 30-borrower floor for prior fitting. They still
-get posteriors, which is the entire point:
-
-| Segment | n | Raw rate | Posterior mean | 95% credible interval | Weight on own data |
-|---|---|---|---|---|---|
-| `other_unknown \| 50-60` | 6 | 0.000 | 0.220 | [0.181, 0.261] | 0.01 |
-| `other_unknown \| 30-40` | 18 | 0.056 | 0.216 | [0.178, 0.256] | 0.04 |
-| `other_unknown \| 20-30` | 17 | 0.059 | 0.216 | [0.178, 0.257] | 0.04 |
-
-A raw 0% default rate on six borrowers becomes a posterior mean of 0.220 with an
-honest interval. The 0.01 weight is not configured anywhere - it is
-`n / (n + a + b)` = `6 / (6 + 398)`.
-
-The stability gate then compares each model's mean predicted PD per segment against
-these intervals. For LightGBM, 4 of 11 gated segments fall outside: it prices
-`graduate_school | 30-40` at a mean PD of 0.163 against a shrunken posterior of 0.213
-with interval [0.187, 0.239], built from 560 reference borrowers. The model
-systematically under-prices default risk for better-educated mid-career borrowers
-relative to their actual default experience. That is a provisioning problem that no
-aggregate metric on the leaderboard surfaces.
+Two honest limitations, stated rather than skipped: the prior itself is fit from
+only 12 of the 19 groups (the ones with enough data), and the intervals treat that
+fitted prior as if it were known exactly, which understates the true uncertainty a
+little. The full math, including that caveat, is in the whitepaper.
 
 ## Tech stack
 
 | Area | Choice |
 |---|---|
-| Models | scikit-learn `LogisticRegression`, `xgboost`, `lightgbm` (all required) |
-| Bayesian layer | numpy + scipy only - no extra modelling dependency |
-| Config | pydantic v2 `Settings` loaded from `config.yaml`, `extra="forbid"` |
-| Explainability | `shap` exact TreeExplainer / LinearExplainer |
-| Tracking | MLflow, with a local JSON run log as fallback |
-| Tests | pytest |
-| Lint | ruff |
-| CI | GitHub Actions: lint, tests on 3.12/3.13, end-to-end smoke |
+| Models | scikit-learn `LogisticRegression`, `xgboost`, `lightgbm` |
+| Bayesian layer | numpy + scipy only, no extra dependency |
+| Config | pydantic v2, validated at startup from `config.yaml` |
+| Explainability | `shap` |
+| Tracking | MLflow, with a local JSON fallback |
+| Tests / lint | pytest / ruff |
+| CI | GitHub Actions — lint, tests on 3.12 and 3.13, a full end-to-end smoke run |
 
-Class weights are left at their natural values throughout. Rebalancing buys no
-measurable discrimination here - refitting with `class_weight="balanced"` moves test
-ROC-AUC by +0.0016 for logistic regression and -0.0033 for LightGBM, inside the
-fold-to-fold spread and not even signed consistently between the two - while it does
-reliably destroy calibration (logistic ECE 0.0333 -> 0.2116, LightGBM 0.0411 ->
-0.1303, mean predicted PD 0.217 -> 0.432 and 0.206 -> 0.342 against an observed
-0.221). A probability of default that no longer means "probability of default" is
-not usable for provisioning.
+One thing tried and deliberately left out: class rebalancing. Reweighting the
+minority class barely moves ROC-AUC (and not consistently in one direction across
+models) while wrecking calibration — predicted default rates roughly double across
+the board. A probability of default that no longer means "probability of default"
+isn't useful for anything downstream, so the models here are trained on the natural
+class distribution.
 
 ## Project layout
 
 ```
 .
-|-- main.py                          CLI entry point
-|-- config.yaml                      every governance threshold, validated at startup
-|-- pyproject.toml                   ruff + pytest configuration
-|-- requirements.txt                 runtime deps, exact pins
-|-- requirements-dev.txt             pytest, ruff
-|-- data/
-|   |-- raw/                         UCI fetch cache (gitignored)
-|   `-- sample/uci_credit_sample.csv 5,000-row stratified offline sample (committed)
-|-- reports/                         generated scorecards, model cards, SHAP (gitignored)
-|-- financial_ai_framework/
-|   |-- config.py                    pydantic v2 Settings + GateThreshold
-|   |-- bayes/
-|   |   `-- segment_shrinkage.py     SegmentShrinkageModel, SegmentStabilityCheck
-|   |-- data/
-|   |   |-- loader.py                UCI fetch, cache, stratified sample, segments
-|   |   `-- processor.py             feature engineering, prohibited-basis exclusion
-|   |-- models/
-|   |   `-- benchmark.py             ModelBenchmarkSuite, BenchmarkResult
-|   |-- governance/
-|   |   |-- gates.py                 GateResult, status aggregation
-|   |   |-- fairness.py              demographic parity, equalized odds
-|   |   |-- drift.py                 Population Stability Index
-|   |   |-- calibration.py           ECE, MCE, Brier (single source of truth for ECE)
-|   |   |-- uncertainty.py           predictive entropy, bootstrap AUC interval
-|   |   `-- reporter.py              GovernanceReporter: scorecard + model cards
-|   |-- explainability/
-|   |   |-- shap.py                  global attribution + local explanations
-|   |   `-- feature_importance.py    cross-model native importance consensus
-|   `-- utils/
-|       `-- tracking.py              ExperimentTracker (MLflow / local JSON)
-|-- tests/                           pytest suite, one module per component
-`-- .github/workflows/ci.yml         lint, test matrix, end-to-end smoke
+├── main.py                      CLI entry point
+├── config.yaml                  every gate threshold, validated at startup
+├── data/
+│   └── sample/                  the committed 5,000-row offline sample
+├── financial_ai_framework/
+│   ├── bayes/                   empirical-Bayes segment shrinkage
+│   ├── data/                    UCI loading, caching, feature engineering
+│   ├── models/                  the benchmark suite
+│   ├── governance/              the five gates + report/scorecard generation
+│   ├── explainability/          SHAP
+│   └── utils/                   experiment tracking
+├── tests/                       one module per component
+└── .github/workflows/ci.yml     lint, test matrix, end-to-end smoke
 ```
 
-## Testing and CI
+## Testing
 
 ```bash
 pip install -r requirements.txt -r requirements-dev.txt
@@ -377,32 +204,14 @@ pytest
 ruff check .
 ```
 
-Three CI jobs run on every push and pull request:
-
-1. **lint** - `ruff check .`
-2. **test** - pytest on Python 3.12 and 3.13
-3. **smoke** - `python main.py --sample` end to end, then a verification step that
-   asserts both scorecards and all three model cards were written, that three models
-   were benchmarked with all five gates each, that every ROC-AUC beat chance, and
-   that the shrinkage prior was actually fitted. Reports upload as a build artifact.
-
-The tests are written so that each gate has to fire on a known-bad synthetic input
-and stay quiet on a known-good one, since a gate that does not distinguish the two
-would still report a verdict. The Bayesian module is tested against the posterior
-algebra directly:
-that the blend weight equals `n / (n + a + b)`, that the posterior mean is the
-implied weighted average of the raw and population rates, that shrinkage is monotone
-in segment size, and that thin segments get wider intervals.
-
-One detail worth flagging for anyone extending the suite: the calibration gate's
-Brier limits are set against this dataset's 22% base rate. A *perfectly* calibrated
-model on a 50/50 book scores a Brier of about 0.17 and would legitimately trip them,
-so synthetic fixtures need a realistic base rate or they will fail for the wrong
-reason.
+Every gate is tested against both a known-bad and a known-good synthetic input, so a
+gate that just always says "pass" would get caught. CI runs the full pipeline on the
+committed sample on every push and checks that real output came out the other end —
+not just that the script exited without crashing.
 
 ## Author
 
-Aryan Singh - [github.com/asynced24](https://github.com/asynced24)
+Aryan Singh — [github.com/asynced24](https://github.com/asynced24)
 
-Code is MIT licensed, see [LICENSE](LICENSE). The committed data sample carries its
-own CC BY 4.0 attribution, recorded in [NOTICE](NOTICE).
+MIT licensed, see [LICENSE](LICENSE). The dataset sample carries its own CC BY 4.0
+attribution in [NOTICE](NOTICE).
