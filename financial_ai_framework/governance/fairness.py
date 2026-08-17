@@ -1,9 +1,24 @@
 """Fairness gate: demographic parity and equalized odds on protected attributes.
 
-The attributes audited here (``sex``, ``age_band``) are deliberately withheld from
-the feature matrix - see ``data/processor.py``. Measuring a gap anyway is the
-point: correlated repayment-behaviour features can reintroduce disparate impact
-that excluding the attribute does nothing to prevent.
+The two attributes audited here are not withheld on the same terms, and the
+results have to be read differently as a result.
+
+``sex`` and ``marriage`` are prohibited bases for a credit decision. They are
+excluded from the feature matrix entirely - see ``data/processor.py`` - and kept
+only as audit columns. A gap measured on ``sex`` is therefore a gap the model
+produced without ever seeing the attribute, which is direct evidence that
+dropping a column does not remove its effect: correlated repayment-behaviour
+features carry it back in.
+
+``age`` is used as a feature. It is a legitimate, non-protected-basis predictor
+under standard fair-lending treatment, so it stays in the matrix, and
+``age_band`` is audited alongside ``sex`` to check for disparate impact. But a
+gap on ``age_band`` is at least partly the model using an input it was given. It
+raises the question of whether that use is justified; it is not evidence of a
+withheld attribute leaking back in, the way a gap on ``sex`` or ``marriage`` is.
+
+``details["withheld_from_features"]`` records which of the two cases each
+audited attribute falls into.
 
 Definitions used
 ----------------
@@ -26,7 +41,23 @@ import pandas as pd
 from sklearn.metrics import roc_auc_score
 
 from ..config import Settings
+from ..data.processor import PROHIBITED_FEATURES
 from .gates import GateResult, worst_status
+
+#: The raw column behind each auditable attribute. ``age_band`` is a binned view
+#: of ``age``, which is a model feature; the rest map to themselves.
+AUDIT_ATTRIBUTE_SOURCE: dict[str, str] = {
+    "sex": "sex",
+    "sex_label": "sex",
+    "marriage": "marriage",
+    "marriage_label": "marriage",
+    "age_band": "age",
+}
+
+
+def _withheld_from_features(attribute: str) -> bool:
+    """Whether the column behind ``attribute`` is kept out of the feature matrix."""
+    return AUDIT_ATTRIBUTE_SOURCE.get(attribute, attribute) in PROHIBITED_FEATURES
 
 
 def _rates(y_true: np.ndarray, y_pred: np.ndarray) -> tuple[float, float]:
@@ -203,7 +234,12 @@ class FairnessAnalyzer:
                 "model": model_name,
                 "decision_threshold": self.settings.models.decision_threshold,
                 "min_group_size": min_group,
-                "withheld_from_features": True,
+                # Per attribute, not blanket: sex/marriage are excluded from the
+                # feature matrix, age_band is not (age itself is a predictor).
+                "withheld_from_features": {
+                    attribute: _withheld_from_features(attribute)
+                    for attribute in per_attribute
+                },
                 "skipped": skipped,
                 "attributes": per_attribute,
             },

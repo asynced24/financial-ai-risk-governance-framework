@@ -37,7 +37,10 @@ RECOMMENDATION = {
 }
 
 GATE_PURPOSE = {
-    "fairness": "Disparate impact on protected attributes withheld from the feature set",
+    "fairness": (
+        "Disparate impact on protected attributes - sex and marriage are withheld "
+        "from the feature set, age_band is a binned view of a feature the model uses"
+    ),
     "drift": "Train-vs-test population stability of every model input",
     "calibration": "Whether the predicted probability of default means what it says",
     "uncertainty": "Share of the book the model cannot separate, and AUC stability",
@@ -503,9 +506,15 @@ class GovernanceReporter:
             "### Withheld inputs",
             "",
             "`sex` and `marriage` are prohibited bases for a credit decision and are "
-            "excluded from the feature matrix. They are retained only as audit columns "
-            "so the fairness gate can measure disparate impact on attributes the model "
-            "never observed.",
+            "excluded from the feature matrix. They are retained only as audit columns, "
+            "so a gap the fairness gate reports on `sex` is a gap on an attribute the "
+            "model never observed.",
+            "",
+            "`age` is not withheld. It is used as a predictor, on the standard "
+            "fair-lending view that age is a legitimate underwriting input rather than "
+            "a prohibited basis, and the fairness gate audits `age_band` on top of that "
+            "to check for disparate impact. A gap there is a question about whether that "
+            "use is justified, not evidence of a withheld attribute leaking back in.",
             "",
             "## Training setup",
             "",
